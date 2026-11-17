@@ -108,8 +108,7 @@ impl<'a> Window<'a> {
 
     /// When the display asked for the frame now running, or `None` for a
     /// frame nothing vsync-locked asked for: a repaint from a notification,
-    /// a frame the watchdog ran while the display link was paused, and every
-    /// frame off macOS.
+    /// and every frame off macOS.
     pub fn frame_timing(&self) -> Option<crate::FrameTiming> {
         #[cfg(target_os = "macos")]
         return self.window.frame_timing();

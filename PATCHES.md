@@ -14,10 +14,11 @@ wired in via `[patch.crates-io]`, here and in each project, which covers both a 
 The `hitTest:` override is gone with it (its `ViewImpl` method, registration and extern fn), since its one case was the deleted OpenGL subview; otonal's fork deleted it the same way.
 - **No-window platform off macOS** (`src/platform/none.rs`, from otonal's prune in yan-h/otonal#1557): no window opens, and everything else compiles, so a Linux cloud session builds the workspace and runs its headless tests.
 `open_parented` returns a handle that reports itself closed, `open_blocking` returns at once, and `Window` is uninhabited, so a build closure is never called.
-- **Patch** (3 lines, `src/wrappers/appkit/timer.rs`): register the macOS
+- **Patch** (retired with its file, `src/wrappers/appkit/timer.rs`): registered the macOS
 run-loop timer in `kCFRunLoopCommonModes` instead of `kCFRunLoopDefaultMode`.
 Default-mode timers stop firing while the run loop is in an event-tracking mode (native drags/resizes, menu tracking), freezing plugin GUIs until mouse release.
-The timer was upstream's frame timer; since patch 4 it is only the display link's watchdog, and the link itself is added in common modes too.
+The timer was upstream's frame timer, then the display link's watchdog (patch 4), and went with the watchdog when patch 9 stopped frames for a view nobody can see;
+the link is added in common modes for the same reason.
 - **Patch 2** (4 sites: `src/platform/macos/{window,view}.rs`,
 `src/wrappers/appkit/view.rs` + `view/implementation.rs`):
 own the mouse cursor properly.
@@ -34,7 +35,8 @@ everything is correct from the first click on.
 `src/wrappers/appkit/view.rs` + `view/implementation.rs`):
 new `WindowEvent::Occluded(bool)` (mirroring winit's event), emitted from an `NSWindowDidChangeOcclusionStateNotification` observer filtered to the view's own window.
 On re-expose the view is marked `setNeedsDisplay` and, more to the point, a frame is run right there in the notification rather than left to the next display-link callback (patch 4) —
-nothing can present while the window is occluded, so what is on screen is the drawable from before it was hidden, and the ghost lasts exactly until one frame gets out.
+nothing presents while the window is occluded (no frame runs for it, patch 9), so what is on screen is the drawable from before it was hidden, and the ghost lasts exactly until one frame gets out.
+That frame passes patch 9's test, which reads the same occlusion state the notification has just reported visible.
 Waiting for the callback made that up to a frame interval:
 measured at 11-14 ms under the ~15 ms frame timer the link replaced, and it scales with the frame divisor, so a frame-rate cap makes it worse;
 painting from the notification measures under 1 ms. `trigger_frame` takes the handler borrow fallibly to stay safe against a notification arriving mid-frame (that direction only —
@@ -62,9 +64,9 @@ and the callback holds its own reference to the view because a frame can close t
 `Window::set_frame_divisor` draws on every Nth refresh, paced on the link's `targetTimestamp` rather than by counting callbacks, with the next frame due half a refresh short of N ahead so jitter cannot slip it.
 A divisor rather than a rate because the link's `preferredFrameRateRange` rounds to divisors of the panel's rate: measured on a 144 Hz panel, 120 ran at 144 and 90 and 60 at 72.
 A link stops while its view is hidden or its window minimized or ordered out (measured; it keeps firing while the window is merely covered),
-so the common-mode timer from patch 1 survives as a 10 Hz watchdog that runs a frame whenever the link has been silent for 100 ms:
-the frame is also what ages the plugin's notes and lets an armed take end itself while the editor is open but out of sight (its rings are drained by the plugin's input worker, #1566),
-and what repairs a stuck button or a withheld exit.
+and no frame runs for any of these anyway (patch 9), so nothing stands in for a stopped link.
+A 10 Hz watchdog timer did until patch 9, for harmonigraph, whose frames aged its notes and ended an armed take while the editor was open but out of sight;
+that work belongs to the plug-in's input worker, not to frames nobody sees.
 `Window::frame_timing` hands the frame callback the link's timestamps and the divisor it paced the frame at, for egui-baseview's frame log,
 and the fire on `Instant`'s clock beside the media clock's (`fired_at`);
 `FrameTiming::target_at` puts the target on `Instant`'s clock, refusing one more than 0.1 s from the fire, for the plugin's picture and egui's clock to time the frame by.
@@ -109,15 +111,26 @@ Once the view moves into a window of its own, that window's responder chain ends
 `tests/host_keys.rs` (no harness: AppKit needs the main thread) sends Cmd-S through real native views while docked, in their own window and redocked, and checks the host gets each ignored event once and no captured one;
 `cargo test -p baseview` runs it, so `ci.sh` does on macOS; elsewhere `ci.sh` only builds it.
 macOS only.
+- **Patch 9** (`src/platform/macos/view.rs`, `tests/unseen_frames.rs`, `Cargo.toml`; from otonal's fork): run no frame for a view nobody can see.
+`trigger_frame` returns at once unless the view is not hidden, has no hidden ancestor, and is in a window whose `occlusionState` contains `Visible` (`is_visible`):
+a view hidden, or in a window covered, minimized, ordered out or on another Space, runs nothing, not even the settles of patches 5 and 6.
+Asked of AppKit on every frame rather than kept from patch 3's notification, so it cannot go stale when a notification is lost;
+a covered window's link still fires on every refresh, so the test is three AppKit calls and nothing more.
+Ahead of the settles because an unseen view has no gesture to settle: a release or exit owed then is paid on the first frame it shows, before anything is drawn.
+Events still reach the handler while the view is unseen, and the reveal's frame (patch 3) draws what they changed.
+It retires patch 4's 10 Hz watchdog and with it patch 1's timer.
+`tests/unseen_frames.rs` (no harness, as `host_keys.rs`) sends `displayLinkFired:` by hand to a view in a window that is not on screen, and to one in no window, and checks that neither runs a frame;
+a frame running for a view that can be seen is not tested, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
+macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
 its disposition table stops at Patch 6, so dispose of later patches from their entries here.
 Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was retired whole in #1747, with the idle pacing it served;
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
-baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, watchdog or frame timing.
+baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the `kCFRunLoop*` lines, the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link with its divisor, watchdog and frame timing, the withheld pointer exit, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -288,9 +301,10 @@ Mouse and key events now both replace all five fields with the event's own set, 
 upstream egui-baseview 0.7 already has this shape.
 - **Patch 17** (`src/window.rs`): stop drawing frames for a surface that
 keeps refusing to present (#989).
-A present refused three times in a row (`REFUSALS_BEFORE_BACKOFF`) is offered another only every 250 ms (`SURFACE_RETRY`) instead of every timer tick, because an occluded window's acquire is refused rather than waited on, and drawing anyway submitted 60-144 unpresented frames a second against 13-37 ms of GPU work with nothing pacing them —
+A present refused three times in a row (`REFUSALS_BEFORE_BACKOFF`) is offered another only every 250 ms (`SURFACE_RETRY`) instead of every frame, because an occluded window's acquire is refused rather than waited on, and drawing anyway submitted 60-144 unpresented frames a second against 13-37 ms of GPU work with nothing pacing them —
 wgpu reclaims a frame's staged uploads only when its submission completes, so outrunning the device grew the in-flight set into gigabytes within a minute of switching away from the host.
 Keyed on the refusals rather than the occlusion event, since wgpu-hal and baseview read occlusion off different windows and can disagree, and the first present that lands (or an `Occluded(false)`) clears the backoff.
+baseview runs no frame for a window it reads as occluded (its patch 9), so what is left for the backoff is that disagreement: a surface wgpu-hal reads as occluded in a window baseview reads as visible.
 Texture deltas need no exemption: every pass renders (Patch 22), so a frame carrying one is never skipped and glyph coordinates never point into a stale atlas.
 The same change also runs `free_textures` on all three render exits instead of only past the acquire:
 a `free`-only delta on a bailing frame used to drop egui's texture-manager ids permanently, leaking the retired atlas exactly when the backoff above forces a frame through on the strength of consuming that delta.
@@ -335,7 +349,10 @@ a frame at or past it is due, and where a deadline falls exactly on a refresh (t
 Every pass that runs renders.
 While Patch 17's backoff is armed, its retry decides alone, a request included, so a thread asking on every change cannot reopen #989's unpaced submits; the request stays set for the retry's pass.
 A size from the `SizeSource` runs that frame's pass whatever the backoff says, since the source hands each size over once and only a pass applies it.
-`Queue::longest_tick_gap` hands the app the longest gap between link frames since its last pass, measured on every frame, for its stall check.
+`Queue::longest_tick_gap` hands the app the longest gap between frames since its last pass, measured on every frame, for its stall check (`TickGaps`).
+No frame runs while the window cannot be seen (baseview patch 9), so the gap across an occlusion would be the time spent unseen, ended by the reveal's frame:
+`Occluded(true)` ends the gap in progress instead, and the next starts at the reveal.
+Until baseview's watchdog went, only a gap out of a frame the link asked for counted, so that the watchdog's slow frames were not stalls; with nothing but a reveal left that the link does not ask for, every frame counts.
 It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on the frame the idle poll drew on, and is retired whole with baseview Patch 7:
 `paced_divisor`, `PACE_MARGIN`, `MAX_FRAME_GAP`, `RESIZE_HOLD`, the restore of the chosen divisor on every event and the earliest-deadline keep for undrawn passes all went with it.
 - **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): one owner for a size a surface can be made at.

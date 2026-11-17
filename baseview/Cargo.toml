@@ -50,6 +50,11 @@ name = "host_keys"
 path = "tests/host_keys.rs"
 harness = false
 
+[[test]]
+name = "unseen_frames"
+path = "tests/unseen_frames.rs"
+harness = false
+
 [dependencies.keyboard-types]
 version = "0.6.1"
 default-features = false

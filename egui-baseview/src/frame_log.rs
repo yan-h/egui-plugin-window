@@ -11,8 +11,8 @@
 //! - `tick`, from the main thread at the end of every frame callback, whether
 //!   or not it ran the UI: one that did not (nothing asked for a pass, see
 //!   `pass_due`) has `submitted` and `render_ms` 0, and its `tick_ms` is what
-//!   deciding that cost. A frame the display link did not ask for (the
-//!   watchdog's, or the one painted as the window is revealed) has 0 for the
+//!   deciding that cost. A frame the display link did not ask for (the one
+//!   painted as the window is revealed) has 0 for the
 //!   link's times and no `divisor`, the app's frame rate divisor the link
 //!   paced it at;
 //! - `gpu`, from Metal's completion handler on the present's command buffer.

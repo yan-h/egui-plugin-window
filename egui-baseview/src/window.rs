@@ -328,9 +328,9 @@ impl<'a> Queue<'a> {
         self.frame_timing
     }
 
-    /// The longest gap since the last pass between two frames the display
-    /// asked for, or out of one into a frame it did not (see `TickGaps`):
-    /// what an app's check for a stalled run loop reads. Measured on every
+    /// The longest gap between two frames since the last pass, leaving out
+    /// the time the window spent unseen (see `TickGaps`): what an app's
+    /// check for a stalled run loop reads. Measured on every
     /// frame, the ones that run no pass included, so a pass that waited out
     /// the idle poll reads the display's own gaps rather than the poll's.
     pub fn longest_tick_gap(&self) -> Option<Duration> {
@@ -751,7 +751,7 @@ const REFUSALS_BEFORE_BACKOFF: u32 = 3;
 ///
 /// Two things set it. Below the GPU's own frame time it stops bounding
 /// anything, since the whole point is to submit slower than the device
-/// drains; a hidden editor costs 4 unpresented frames a second here against
+/// drains; a refusing surface costs 4 unpresented frames a second here against
 /// the 60-144 it used to. Above a few hundred milliseconds it starts being
 /// visible in the case the poll exists for — a surface that has quietly
 /// become available again without anything saying so — where this interval is
@@ -783,10 +783,12 @@ const SURFACE_RETRY: Duration = Duration::from_millis(250);
 /// surface and a device.
 ///
 /// `retry_after` is the term that is not about what the UI wants. A surface
-/// that refuses to present — which is what an occluded window does, on every
-/// tick, for as long as the editor is hidden behind something — makes the
-/// frame one nobody sees. Drawing it anyway is not merely waste: the acquire
-/// is ALSO where a presenting frame waits for vsync,
+/// that refuses to present makes the frame one nobody sees. An occluded
+/// window's acquire is refused, and baseview runs no frame for a window it
+/// reads as occluded; but wgpu-hal reads occlusion off a different window
+/// (below), so a frame baseview runs can still be refused, on every tick, for
+/// as long as the two disagree. Drawing it anyway is not merely waste: the
+/// acquire is ALSO where a presenting frame waits for vsync,
 /// and that wait is the only backpressure in this loop. Refused immediately
 /// instead of waited on, it leaves the tick free to encode and submit a whole
 /// scene every frame while the GPU is still working through the last one.
@@ -838,7 +840,7 @@ fn pass_due(
 
 /// The instant this frame is drawn for: the display link's target refresh,
 /// which a frame the link asked for is on screen by, or `now` for one it did
-/// not (the watchdog's, a reveal's, any frame off macOS). One clock for egui's
+/// not (a reveal's, any frame off macOS). One clock for egui's
 /// time, the repaint deadline and the decision on it.
 fn frame_at(timing: Option<baseview::FrameTiming>, now: Instant) -> Instant {
     timing.and_then(|timing| timing.target_at()).unwrap_or(now)
@@ -848,24 +850,28 @@ fn frame_at(timing: Option<baseview::FrameTiming>, now: Instant) -> Instant {
 /// not, for an app's check that its run loop has not stalled
 /// ([`Queue::longest_tick_gap`]).
 ///
-/// Only a gap out of a frame the display link asked for counts. A view whose
-/// link has paused (minimized, ordered out) runs on baseview's watchdog, a
-/// frame every 0.1 s or slower, and that cadence is the pause rather than a
-/// stall: counted, it logged a line per frame. The first gap out of a link
-/// frame still counts, whatever ends it.
+/// baseview runs no frame while the window cannot be seen, so the gap across
+/// an occlusion is the time it spent unseen, ended by the frame that reveals
+/// it, rather than a stall. `Occluded(true)` therefore ends the gap in
+/// progress (`unseen`), and the next one starts at the reveal.
 #[derive(Default)]
 struct TickGaps {
-    last_linked: Option<Instant>,
+    last: Option<Instant>,
     longest: Option<Duration>,
 }
 
 impl TickGaps {
-    fn tick(&mut self, at: Instant, linked: bool) {
-        if let Some(last) = self.last_linked {
+    fn tick(&mut self, at: Instant) {
+        if let Some(last) = self.last {
             let gap = at.saturating_duration_since(last);
             self.longest = Some(self.longest.map_or(gap, |longest| longest.max(gap)));
         }
-        self.last_linked = linked.then_some(at);
+        self.last = Some(at);
+    }
+
+    /// The window went out of sight: no gap runs across the time it is.
+    fn unseen(&mut self) {
+        self.last = None;
     }
 
     /// The longest gap since the last take.
@@ -1093,29 +1099,25 @@ mod pass_due_tests {
         assert!(pass_due(false, Some(set), None, set + refresh), "a repaint asked at once");
     }
 
-    /// A gap counts only out of a frame the display link asked for: the
-    /// watchdog's frames while the link is paused are its cadence, not
-    /// stalls, though the first gap out of a link frame into one is still a
-    /// gap. Each pass reads the longest since the last.
+    /// A gap between frames counts, and the time a window spent unseen does
+    /// not: the reveal's frame starts the next gap rather than ending one.
+    /// Each pass reads the longest since the last.
     #[test]
-    fn only_a_gap_out_of_a_link_frame_counts() {
+    fn a_gap_counts_and_the_time_unseen_does_not() {
         let start = Instant::now();
         let at = |seconds: f64| start + Duration::from_secs_f64(seconds);
         let mut gaps = TickGaps::default();
-        gaps.tick(at(0.0), true);
-        gaps.tick(at(0.007), true);
-        gaps.tick(at(0.5), true);
-        gaps.tick(at(0.507), true);
-        assert_eq!(gaps.take(), Some(at(0.5) - at(0.007)), "between two link frames");
+        gaps.tick(at(0.0));
+        gaps.tick(at(0.007));
+        gaps.tick(at(0.5));
+        gaps.tick(at(0.507));
+        assert_eq!(gaps.take(), Some(at(0.5) - at(0.007)), "between two frames");
         assert_eq!(gaps.take(), None, "taken");
-        gaps.tick(at(0.7), false);
-        assert_eq!(gaps.take(), Some(at(0.7) - at(0.507)), "out of a link frame");
-        for tick in 1..=50 {
-            gaps.tick(at(0.7 + 0.21 * f64::from(tick)), false);
-        }
-        assert_eq!(gaps.take(), None, "the watchdog's frames");
-        gaps.tick(at(11.5), true);
-        assert_eq!(gaps.take(), None, "the link's return");
+        gaps.unseen();
+        gaps.tick(at(11.5));
+        assert_eq!(gaps.take(), None, "the reveal");
+        gaps.tick(at(11.507));
+        assert_eq!(gaps.take(), Some(at(11.507) - at(11.5)), "from the reveal on");
     }
 }
 
@@ -1140,7 +1142,7 @@ where
         // Every frame, before deciding whether it runs the UI: the gaps a
         // stall check reads are the display's, not the passes'.
         let timing = window.frame_timing();
-        self.tick_gaps.tick(tick_start, timing.is_some());
+        self.tick_gaps.tick(tick_start);
 
         // BEFORE the input the frame is laid out from: a size this window has
         // already been given from outside (see `SizeSource`). Read after it,
@@ -1554,7 +1556,11 @@ where
                     // frame between coming back and having something fresh to
                     // show. See the wgpu renderer's `layer_present`.
                     self.renderer.window_occluded(*occluded);
-                    if !occluded {
+                    if *occluded {
+                        // No frame runs until the window shows again, and
+                        // that wait is not a stall.
+                        self.tick_gaps.unseen();
+                    } else {
                         // Re-exposed after occlusion: the compositor may
                         // have kept showing a stale snapshot of the window,
                         // and this event runs a pass on the next frame like
