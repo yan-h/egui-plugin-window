@@ -172,8 +172,7 @@ pub struct Queue<'a> {
     bg_color: &'a mut Rgba,
     close_requested: &'a mut bool,
     resize_request: &'a mut Option<PhySize>,
-    key_capture: &'a mut KeyCapture,
-    focus_takes_only_arrows: &'a mut bool,
+    shortcuts: &'a mut Vec<egui::KeyboardShortcut>,
     frame_divisor: &'a mut Option<u32>,
     frame_timing: Option<baseview::FrameTiming>,
     longest_tick_gap: Option<Duration>,
@@ -196,8 +195,7 @@ impl<'a> Queue<'a> {
         bg_color: &'a mut Rgba,
         close_requested: &'a mut bool,
         resize_request: &'a mut Option<PhySize>,
-        key_capture: &'a mut KeyCapture,
-        focus_takes_only_arrows: &'a mut bool,
+        shortcuts: &'a mut Vec<egui::KeyboardShortcut>,
         frame_divisor: &'a mut Option<u32>,
         frame_timing: Option<baseview::FrameTiming>,
         longest_tick_gap: Option<Duration>,
@@ -220,8 +218,7 @@ impl<'a> Queue<'a> {
             //repaint_requested,
             close_requested,
             resize_request,
-            key_capture,
-            focus_takes_only_arrows,
+            shortcuts,
             frame_divisor,
             frame_timing,
             longest_tick_gap,
@@ -367,56 +364,13 @@ impl<'a> Queue<'a> {
         *self.close_requested = true;
     }
 
-    /// Set how to handle capturing key events from the host.
-    pub fn set_key_capture(&mut self, key_capture: KeyCapture) {
-        *self.key_capture = key_capture;
-    }
-
-    /// Say whether the widget with keyboard focus uses only the arrows, which
-    /// leaves every other key to the host. A widget otherwise claims them all,
-    /// and egui cannot tell the two apart. Asked every frame, since it follows
-    /// the focus.
-    pub fn set_focus_takes_only_arrows(&mut self, arrows_only: bool) {
-        *self.focus_takes_only_arrows = arrows_only;
-    }
-}
-
-/// Describes how to handle capturing key events from the host.
-#[derive(Default, Debug, Clone, PartialEq)]
-pub enum KeyCapture {
-    #[default]
-    /// Every key egui claims ([`egui_claims_key`]) is captured from the host.
-    CaptureAll,
-    /// No keys will be captured from the host.
-    IgnoreAll,
-    /// Only the given keys will be captured from the host.
-    CaptureKeys(Vec<keyboard_types::Key>),
-    /// All keys except the given ones will be captured from the host.
-    IgnoreKeys(Vec<keyboard_types::Key>),
-    /// Reserve these shortcuts even without widget focus. Other keys are
-    /// captured only when egui claims them, as with CaptureAll.
-    CaptureShortcuts(Vec<egui::KeyboardShortcut>),
-}
-
-impl KeyCapture {
-    /// `egui_claims` is [`egui_claims_key`]: whether egui itself has a use
-    /// for this key, which every variant but `IgnoreAll` honours.
-    fn status(&self, event: &keyboard_types::KeyboardEvent, egui_claims: bool) -> EventStatus {
-        let captured = match self {
-            Self::IgnoreAll => false,
-            Self::CaptureAll => egui_claims,
-            Self::CaptureKeys(keys) => egui_claims && keys.contains(&event.key),
-            Self::IgnoreKeys(keys) => egui_claims && !keys.contains(&event.key),
-            Self::CaptureShortcuts(shortcuts) => {
-                egui_claims
-                    || shortcuts.iter().any(|shortcut| {
-                        crate::translate::translate_key(event) == Some(shortcut.logical_key)
-                            && crate::translate::translate_modifiers(event.modifiers)
-                                .matches_exact(shortcut.modifiers)
-                    })
-            }
-        };
-        if captured { EventStatus::Captured } else { EventStatus::Ignored }
+    /// Set the shortcuts the editor keeps from the host while no text field
+    /// is focused, matched exactly (`owns_key`). Kept until set again, so an
+    /// app whose shortcuts follow its state sets them every frame; a key
+    /// arrives between frames, so it meets the last list set. Empty until set.
+    pub fn set_shortcuts(&mut self, shortcuts: &[egui::KeyboardShortcut]) {
+        self.shortcuts.clear();
+        self.shortcuts.extend_from_slice(shortcuts);
     }
 }
 
@@ -478,9 +432,8 @@ where
     /// `repaint_after` is what the UI asked for, this is what the surface has
     /// shown it will accept. See [`pass_due`].
     retry_after: Option<Instant>,
-    key_capture: KeyCapture,
-    /// See [`Queue::set_focus_takes_only_arrows`].
-    focus_takes_only_arrows: bool,
+    /// See [`Queue::set_shortcuts`].
+    shortcuts: Vec<egui::KeyboardShortcut>,
     /// Tessellation time from the PREVIOUS frame — it is measured inside
     /// `render`, which runs after the update closure, so the closure can only
     /// ever be handed the last one. One frame stale, like every other
@@ -566,15 +519,13 @@ where
         let mut bg_color = Rgba::BLACK;
         let mut close_requested = false;
         let mut resize_request = None;
-        let mut key_capture = KeyCapture::default();
-        let mut focus_takes_only_arrows = false;
+        let mut shortcuts = Vec::new();
         let mut frame_divisor = None;
         let mut queue = Queue::new(
             &mut bg_color,
             &mut close_requested,
             &mut resize_request,
-            &mut key_capture,
-            &mut focus_takes_only_arrows,
+            &mut shortcuts,
             &mut frame_divisor,
             // The build runs outside any frame the display asked for.
             None,
@@ -650,8 +601,7 @@ where
             tick_gaps: TickGaps::default(),
             refused_presents: 0,
             retry_after: None,
-            key_capture,
-            focus_takes_only_arrows,
+            shortcuts,
             tess_ms: 0.0,
             draw_gpu_ms: None,
             acquire_ms: 0.0,
@@ -981,13 +931,12 @@ mod pass_due_tests {
         let mut color = Rgba::BLACK;
         let mut close = false;
         let mut size = None;
-        let mut capture = KeyCapture::default();
-        let mut arrows_only = false;
+        let mut shortcuts = Vec::new();
         let mut divisor = None;
         let mut completed = Vec::new();
         for sample in [Some(2.0), None, None, None, None, Some(10.0), None] {
             let mut queue = Queue::new(
-                &mut color, &mut close, &mut size, &mut capture, &mut arrows_only, &mut divisor,
+                &mut color, &mut close, &mut size, &mut shortcuts, &mut divisor,
                 None, None,
                 0.0, sample, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0,
             );
@@ -1192,8 +1141,7 @@ where
             &mut self.bg_color,
             &mut self.close_requested,
             &mut resize_request,
-            &mut self.key_capture,
-            &mut self.focus_takes_only_arrows,
+            &mut self.shortcuts,
             &mut frame_divisor,
             timing,
             self.tick_gaps.take(),
@@ -1383,6 +1331,19 @@ where
             window.focus();
         }
 
+        // Whose key this is, decided once: the host's answer and what egui is
+        // sent both follow it (`owns_key`, `queue_key`).
+        let key_owned = match &event {
+            baseview::Event::Keyboard(event) => {
+                // The set the event carries rather than a toggle per modifier
+                // key, as for mouse events: a key-up that went to another
+                // window is corrected by the next event of either kind.
+                self.update_modifiers(&event.modifiers);
+                owns_key(&self.egui_ctx, &self.shortcuts, self.egui_input.modifiers, event)
+            }
+            _ => false,
+        };
+
         match &event {
             baseview::Event::Mouse(event) => match event {
                 baseview::MouseEvent::CursorMoved {
@@ -1457,68 +1418,13 @@ where
                 }
                 _ => {}
             },
-            baseview::Event::Keyboard(event) => {
-                // The set the event carries rather than a toggle per modifier
-                // key, as for mouse events: a key-up that went to another
-                // window is corrected by the next event of either kind.
-                self.update_modifiers(&event.modifiers);
-
-                let pressed = event.state == keyboard_types::KeyState::Down;
-
-                if let Some(key) = crate::translate::translate_key(event) {
-                    self.egui_input.events.push(egui::Event::Key {
-                        key,
-                        physical_key: None,
-                        pressed,
-                        repeat: event.repeat,
-                        modifiers: self.egui_input.modifiers,
-                    });
-                }
-
-                if pressed {
-                    // VirtualKeyCode::Paste etc in winit are broken/untrustworthy,
-                    // so we detect these things manually:
-                    //
-                    // TODO: See if this is an issue in baseview as well.
-                    let modifiers = self.egui_input.modifiers;
-                    let cut = is_cut_command(modifiers, event.code);
-                    let copy = is_copy_command(modifiers, event.code);
-                    if cut || copy || is_paste_command(modifiers, event.code) {
-                        // A clipboard chord reaches egui only when egui claims
-                        // the key, on the same verdict that decides below
-                        // whether the host sees it. A label selection claims
-                        // the copy chord alone, so a cut there is the host's:
-                        // egui would copy the read-only label on it (#1674).
-                        let claims = egui_claims_key(
-                            &self.egui_ctx,
-                            modifiers,
-                            event,
-                            self.focus_takes_only_arrows,
-                        );
-                        if claims && cut {
-                            self.egui_input.events.push(egui::Event::Cut);
-                        } else if claims && copy {
-                            self.egui_input.events.push(egui::Event::Copy);
-                        } else if claims && let Some(clipboard_ctx) = &mut self.clipboard_ctx {
-                            match clipboard_ctx.get_contents() {
-                                Ok(contents) => {
-                                    self.egui_input.events.push(egui::Event::Text(contents))
-                                }
-                                Err(err) => {
-                                    error!("Paste error: {}", err);
-                                }
-                            }
-                        }
-                    } else if let keyboard_types::Key::Character(written) = &event.key
-                        && !self.egui_input.modifiers.ctrl
-                        && !self.egui_input.modifiers.command
-                    {
-                        self.egui_input
-                            .events
-                            .push(egui::Event::Text(written.clone()));
-                    }
-                }
-            }
+            baseview::Event::Keyboard(event) => queue_key(
+                &mut self.egui_input.events,
+                event,
+                self.egui_input.modifiers,
+                key_owned,
+                self.clipboard_ctx.as_mut(),
+            ),
             baseview::Event::Window(event) => match event {
                 baseview::WindowEvent::Resized(window_info) => {
                     // A zero, non-finite or negative backing scale gives the
@@ -1573,18 +1479,9 @@ where
             },
         }
 
-        // Reserve app shortcuts before returning to the host. Other keys
-        // (spacebar, etc.) pass through unless egui has a use for them.
         match &event {
-            baseview::Event::Keyboard(event) => {
-                let claims = egui_claims_key(
-                    &self.egui_ctx,
-                    self.egui_input.modifiers,
-                    event,
-                    self.focus_takes_only_arrows,
-                );
-                self.key_capture.status(event, claims)
-            }
+            baseview::Event::Keyboard(_) if key_owned => EventStatus::Captured,
+            baseview::Event::Keyboard(_) => EventStatus::Ignored,
             baseview::Event::Mouse(_) => {
                 if self.egui_ctx.egui_is_using_pointer() || self.egui_ctx.egui_wants_pointer_input()
                 {
@@ -1598,45 +1495,157 @@ where
     }
 }
 
-/// Whether egui has a use for this key, so the host must not act on it too.
+/// Whether the editor owns this key: its press reaches egui and is kept from
+/// the host. Every other key is the host's alone, so the host's transport and
+/// shortcuts keep working over the editor, and no key acts in both.
 ///
-/// A focused widget claims every key: Space and Enter click it, and Escape
-/// drops its focus, so the host acting too would be the same key doing two
-/// things. `arrows_only` is the app's word that this one uses just the arrows
-/// ([`Queue::set_focus_takes_only_arrows`]), and it keeps those and Escape.
+/// An open popup owns Escape, which closes it, even without widget focus.
+/// A selection in a label owns the copy chord and Escape: unowned, the same
+/// Cmd-C also goes up to the host, and its own copy competes with the label's
+/// for the pasteboard; Escape clears the selection, and would clear the
+/// host's too. A click without a drag counts, because egui copies the whole
+/// label from a bare cursor. The arrows and Cmd-A, which also move a label
+/// selection, stay the host's: owning them would take the arrows from the
+/// host after any stray click on a label. Cut means nothing on a label, so
+/// the host cuts alone.
 ///
-/// A selection in a label claims the copy chord and Escape: unclaimed, the
-/// same Cmd-C also goes up to the DAW (#1433), and its own Copy competes with
-/// the label's for the pasteboard; Escape clears the selection, and would
-/// clear the DAW's too (#1674). A click without a drag counts, because egui
-/// copies the whole label from a bare cursor. The arrows and Cmd-A, which
-/// also move a label selection, stay the host's: claiming them would take
-/// the arrows from the DAW after any stray click on a label.
+/// A focused text field owns the keys it uses ([`text_edit_owns_key`]), and
+/// a listed shortcut it does not use goes to the host. With no text field
+/// focused, the editor owns exactly its listed shortcuts
+/// ([`Queue::set_shortcuts`]); a focused widget of another kind owns no key
+/// by its focus, so Space after a click on a button is the host's.
 ///
-/// `on_event` sends egui a cut, copy or paste only on this verdict, so under
-/// the capture modes that honour it alone (`CaptureAll`, `CaptureShortcuts`) a
-/// clipboard chord is either egui's or the host's, never both.
-fn egui_claims_key(
+/// Read between egui passes, from the state the last pass left, so persistent
+/// popup and selection memory is read before the Escape that clears it.
+fn owns_key(
     ctx: &egui::Context,
+    shortcuts: &[egui::KeyboardShortcut],
     modifiers: egui::Modifiers,
     event: &keyboard_types::KeyboardEvent,
-    arrows_only: bool,
 ) -> bool {
     use egui::text_selection::LabelSelectionState;
-    use keyboard_types::Key;
-    // By the key, as egui reads it: a numpad arrow is not an arrow by its code.
-    let kept = matches!(
-        event.key,
-        Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Escape
-    );
+    let escape = matches!(event.key, keyboard_types::Key::Escape);
     let label_selected = || {
         ctx.with_plugin(|labels: &mut LabelSelectionState| labels.has_selection()) == Some(true)
     };
-    ctx.egui_wants_keyboard_input() && (kept || !arrows_only)
-        // Popup Escape works without widget focus. Read persistent popup
-        // memory here: this runs between egui passes, before Escape closes it.
-        || matches!(event.key, Key::Escape) && (egui::Popup::is_any_open(ctx) || label_selected())
-        || is_copy_command(modifiers, event.code) && label_selected()
+    if escape && egui::Popup::is_any_open(ctx)
+        || (escape || is_copy_command(modifiers, event.code)) && label_selected()
+    {
+        return true;
+    }
+    if ctx.text_edit_focused() {
+        return text_edit_owns_key(event, modifiers);
+    }
+    let key = crate::translate::translate_key(event);
+    shortcuts.iter().any(|shortcut| {
+        key == Some(shortcut.logical_key) && modifiers.matches_exact(shortcut.modifiers)
+    })
+}
+
+/// Send egui a key event as `owns_key` decided it. A press the host gets never
+/// reaches egui, so one keystroke acts in one place; an owned press brings its
+/// key, and its text or its cut, copy or paste. A release always reaches egui,
+/// so a key cannot stay held there when focus or modifiers changed after its
+/// press.
+fn queue_key(
+    events: &mut Vec<egui::Event>,
+    event: &keyboard_types::KeyboardEvent,
+    modifiers: egui::Modifiers,
+    owned: bool,
+    clipboard: Option<&mut Clipboard>,
+) {
+    let pressed = event.state == keyboard_types::KeyState::Down;
+    if pressed && !owned {
+        return;
+    }
+
+    if let Some(key) = crate::translate::translate_key(event) {
+        events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: event.repeat,
+            modifiers,
+        });
+    }
+
+    if pressed {
+        // VirtualKeyCode::Paste etc in winit are broken/untrustworthy,
+        // so we detect these things manually:
+        //
+        // TODO: See if this is an issue in baseview as well.
+        if is_cut_command(modifiers, event.code) {
+            events.push(egui::Event::Cut);
+        } else if is_copy_command(modifiers, event.code) {
+            events.push(egui::Event::Copy);
+        } else if is_paste_command(modifiers, event.code) {
+            if let Some(clipboard) = clipboard {
+                match clipboard.get_contents() {
+                    Ok(contents) => events.push(egui::Event::Text(contents)),
+                    Err(err) => {
+                        error!("Paste error: {}", err);
+                    }
+                }
+            }
+        } else if let keyboard_types::Key::Character(written) = &event.key
+            && !modifiers.ctrl
+            && !modifiers.command
+        {
+            events.push(egui::Event::Text(written.clone()));
+        }
+    }
+}
+
+/// The keys a focused text field uses: whatever `on_event` sends it as typing
+/// or a clipboard event, and egui's TextEdit editing commands. Whether a
+/// character is valid belongs to the field: a letter a number field rejects
+/// must never become a host command.
+fn text_edit_owns_key(event: &keyboard_types::KeyboardEvent, modifiers: egui::Modifiers) -> bool {
+    use keyboard_types::Key as K;
+    if event.is_composing
+        || matches!(
+            event.key,
+            K::Dead
+                | K::Compose
+                | K::Process
+                | K::Shift
+                | K::Control
+                | K::Alt
+                | K::AltGraph
+                | K::Meta
+                | K::CapsLock
+        )
+        || (matches!(event.key, K::Character(_)) && !modifiers.ctrl && !modifiers.command)
+        || is_cut_command(modifiers, event.code)
+        || is_copy_command(modifiers, event.code)
+        || is_paste_command(modifiers, event.code)
+    {
+        return true;
+    }
+
+    use egui::Key;
+    match crate::translate::translate_key(event) {
+        Some(
+            Key::ArrowLeft
+            | Key::ArrowRight
+            | Key::ArrowUp
+            | Key::ArrowDown
+            | Key::Home
+            | Key::End
+            | Key::Backspace
+            | Key::Delete,
+        ) => true,
+        Some(Key::Enter | Key::Tab | Key::Escape) => {
+            !modifiers.alt && !modifiers.ctrl && !modifiers.command
+        }
+        Some(Key::A) if modifiers.command => true,
+        Some(Key::Z | Key::Y) => modifiers.matches_logically(egui::Modifiers::COMMAND),
+        Some(Key::H | Key::K | Key::U | Key::W) => modifiers.ctrl,
+        Some(Key::A | Key::E | Key::P | Key::N | Key::B | Key::F) => {
+            modifiers.ctrl && !modifiers.shift
+        }
+        _ => false,
+    }
 }
 
 fn is_cut_command(modifiers: egui::Modifiers, keycode: keyboard_types::Code) -> bool {
@@ -1769,6 +1778,39 @@ fn set_screen_rect(
 #[cfg(test)]
 mod key_capture_tests {
     use super::*;
+    use keyboard_types::Modifiers as M;
+
+    fn command() -> M {
+        M::META
+    }
+
+    /// Whether the editor owns `event`, read with the modifiers it carries.
+    fn owns(
+        ctx: &egui::Context,
+        shortcuts: &[egui::KeyboardShortcut],
+        event: &keyboard_types::KeyboardEvent,
+    ) -> bool {
+        owns_key(ctx, shortcuts, crate::translate::translate_modifiers(event.modifiers), event)
+    }
+
+    /// What egui is sent for `event` on the verdict `owned`.
+    fn queued(event: &keyboard_types::KeyboardEvent, owned: bool) -> Vec<egui::Event> {
+        let mut events = Vec::new();
+        let modifiers = crate::translate::translate_modifiers(event.modifiers);
+        queue_key(&mut events, event, modifiers, owned, None);
+        events
+    }
+
+    /// A context whose last pass left a text field focused.
+    fn typing() -> egui::Context {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.text_edit_singleline(&mut text).request_focus()
+        });
+        assert!(ctx.text_edit_focused());
+        ctx
+    }
 
     #[test]
     fn escape_closes_an_unfocused_combo_without_reaching_the_host() {
@@ -1792,14 +1834,7 @@ mod key_capture_tests {
         assert!(egui::ComboBox::is_open(&ctx, combo.get()));
         assert!(!ctx.egui_wants_keyboard_input());
         let event = KeyboardEvent { key: Key::Escape, state: KeyState::Down, ..Default::default() };
-        for arrows_only in [false, true] {
-            let claimed = egui_claims_key(&ctx, egui::Modifiers::NONE, &event, arrows_only);
-            assert!(claimed, "the popup uses Escape even without widget focus");
-            assert_eq!(
-                KeyCapture::CaptureShortcuts(vec![]).status(&event, claimed),
-                EventStatus::Captured
-            );
-        }
+        assert!(owns(&ctx, &[], &event), "the popup uses Escape even without widget focus");
         let input = egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -1812,68 +1847,189 @@ mod key_capture_tests {
         };
         let _ = ctx.run_ui(input, &mut draw);
         assert!(!egui::ComboBox::is_open(&ctx, combo.get()));
-        assert!(!egui_claims_key(&ctx, egui::Modifiers::NONE, &event, false));
+        assert!(!owns(&ctx, &[], &event));
     }
 
     #[test]
     fn reserved_shortcuts_are_not_forwarded_to_the_host_without_widget_focus() {
-        use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers as M};
-        let command = M::META;
-        let capture = KeyCapture::CaptureShortcuts(vec![
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let shortcuts = [
             egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z),
             egui::KeyboardShortcut::new(
                 egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
                 egui::Key::Z,
             ),
-            egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Y),
-        ]);
+            egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Delete),
+            egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Escape),
+            egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Escape),
+        ];
+        // A focused button changes nothing: only a text field takes keys.
+        let button = egui::Context::default();
+        let _ = button.run_ui(egui::RawInput::default(), |ui| ui.button("button").request_focus());
         for (key, modifiers, expected) in [
-            ("z", command, EventStatus::Captured),
-            ("Z", command | M::SHIFT, EventStatus::Captured),
-            ("y", M::CONTROL, EventStatus::Captured),
-            ("z", M::empty(), EventStatus::Ignored),
-            ("z", command | M::ALT, EventStatus::Ignored),
-            (" ", M::empty(), EventStatus::Ignored),
-            ("s", command, EventStatus::Ignored),
+            (Key::Character("z".into()), command(), true),
+            (Key::Character("Z".into()), command() | M::SHIFT, true),
+            (Key::Delete, M::empty(), true),
+            (Key::Escape, M::empty(), true),
+            (Key::Escape, M::SHIFT, true),
+            (Key::Character("z".into()), M::empty(), false),
+            (Key::Character("z".into()), command() | M::ALT, false),
+            (Key::Character(" ".into()), M::empty(), false),
+            (Key::Character("s".into()), command(), false),
         ] {
             for state in [KeyState::Down, KeyState::Up] {
-                let event = KeyboardEvent {
-                    key: Key::Character(key.into()),
-                    modifiers,
-                    state,
-                    ..Default::default()
-                };
-                assert_eq!(capture.status(&event, false), expected, "{event:?}");
-                assert_eq!(capture.status(&event, true), EventStatus::Captured);
-                assert_eq!(KeyCapture::IgnoreAll.status(&event, true), EventStatus::Ignored);
+                let event = KeyboardEvent { key: key.clone(), modifiers, state, ..Default::default() };
+                for ctx in [&egui::Context::default(), &button] {
+                    assert_eq!(owns(ctx, &shortcuts, &event), expected, "{event:?}");
+                }
             }
         }
     }
 
     #[test]
-    fn a_focused_widget_keeps_its_keys_unless_it_takes_only_arrows() {
+    fn unused_commands_reach_the_host_with_or_without_text_focus() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        for (key, modifiers) in [
+            (Key::Character("s".into()), command()),
+            (Key::Character("S".into()), command() | M::SHIFT),
+            (Key::Character("o".into()), command()),
+            (Key::Character("n".into()), command()),
+            (Key::Enter, command()),
+            (Key::Enter, M::ALT),
+            (Key::Tab, M::CONTROL),
+            (Key::Tab, M::ALT),
+            (Key::Escape, M::ALT),
+            (Key::F5, M::empty()),
+            (Key::PageUp, M::empty()),
+        ] {
+            for state in [KeyState::Down, KeyState::Up] {
+                for ctx in [egui::Context::default(), typing()] {
+                    let event = KeyboardEvent { key: key.clone(), modifiers, state, ..Default::default() };
+                    assert!(!owns(&ctx, &[], &event), "{event:?}");
+                    if state == KeyState::Down {
+                        assert_eq!(queued(&event, false), [], "the host's press never reaches egui");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typing_and_text_editing_stay_in_the_focused_field() {
+        use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
+        let ctx = typing();
+        for (key, code, modifiers) in [
+            // A number field may reject these characters; ownership cannot depend on parsing.
+            (Key::Character("s".into()), Code::KeyS, M::empty()),
+            (Key::Character("!".into()), Code::Digit1, M::SHIFT),
+            (Key::Character("å".into()), Code::KeyA, M::ALT),
+            (Key::Character("λ".into()), Code::Unidentified, M::empty()),
+            (Key::Character(" ".into()), Code::Space, M::empty()),
+            (Key::Backspace, Code::Backspace, M::ALT),
+            (Key::Delete, Code::Delete, command()),
+            (Key::ArrowLeft, Code::ArrowLeft, M::CONTROL | M::SHIFT),
+            (Key::ArrowRight, Code::ArrowRight, M::ALT),
+            (Key::ArrowUp, Code::ArrowUp, command()),
+            (Key::ArrowDown, Code::ArrowDown, M::SHIFT),
+            (Key::Home, Code::Home, M::empty()),
+            (Key::End, Code::End, M::SHIFT),
+            (Key::Enter, Code::Enter, M::empty()),
+            (Key::Tab, Code::Tab, M::SHIFT),
+            (Key::Escape, Code::Escape, M::empty()),
+            (Key::Character("a".into()), Code::KeyA, command()),
+            (Key::Character("z".into()), Code::KeyZ, command()),
+            (Key::Character("Z".into()), Code::KeyZ, command() | M::SHIFT),
+            (Key::Character("y".into()), Code::KeyY, command()),
+            (Key::Character("x".into()), Code::KeyX, command()),
+            (Key::Character("v".into()), Code::KeyV, command()),
+            // Clipboard translation uses physical codes, even on another layout.
+            (Key::Character("q".into()), Code::KeyC, command()),
+            (Key::Character("h".into()), Code::KeyH, M::CONTROL),
+            (Key::Character("k".into()), Code::KeyK, M::CONTROL),
+            (Key::Character("u".into()), Code::KeyU, M::CONTROL),
+            (Key::Character("w".into()), Code::KeyW, M::CONTROL),
+            (Key::Character("f".into()), Code::KeyF, M::CONTROL),
+            (Key::Character("e".into()), Code::KeyE, M::CONTROL),
+            (Key::Shift, Code::ShiftLeft, M::SHIFT),
+            (Key::Dead, Code::Unidentified, M::ALT),
+        ] {
+            for state in [KeyState::Down, KeyState::Up] {
+                let event = KeyboardEvent { key: key.clone(), code, modifiers, state, ..Default::default() };
+                assert!(owns(&ctx, &[], &event), "{event:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_focus_replaces_canvas_shortcut_ownership() {
         use keyboard_types::{Key, KeyboardEvent};
-        let claims = |ctx, key, arrows_only| {
-            let event = KeyboardEvent { key, ..Default::default() };
-            egui_claims_key(ctx, egui::Modifiers::NONE, &event, arrows_only)
-        };
-        let space = || Key::Character(" ".into());
+        let save = [egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S)];
+        let event =
+            KeyboardEvent { key: Key::Character("s".into()), modifiers: command(), ..Default::default() };
+        assert!(owns(&egui::Context::default(), &save, &event));
+        assert!(!owns(&typing(), &save, &event));
+    }
+
+    /// A focused control that is not a text field owns no key by its focus,
+    /// so Space after a click on a button plays the host, and never presses
+    /// the button as well.
+    #[test]
+    fn a_focused_button_leaves_space_to_the_host() {
+        use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| ui.button("button").request_focus());
-        assert!(ctx.egui_wants_keyboard_input());
-        let cut = KeyboardEvent { code: keyboard_types::Code::KeyX, ..Default::default() };
-        let cuts = |ctx, arrows_only| egui_claims_key(ctx, egui::Modifiers::COMMAND, &cut, arrows_only);
-        assert!(cuts(&ctx, false), "focus takes a cut");
-        assert!(!cuts(&ctx, true));
-        assert!(!cuts(&egui::Context::default(), false), "unfocused, a cut is the host's");
+        assert!(ctx.egui_wants_keyboard_input() && !ctx.text_edit_focused());
+        let space = KeyboardEvent {
+            key: Key::Character(" ".into()),
+            code: Code::Space,
+            state: KeyState::Down,
+            ..Default::default()
+        };
+        let owned = owns(&ctx, &[], &space);
+        assert!(!owned);
+        assert_eq!(queued(&space, owned), [], "the host's press never reaches egui");
+        let listed = [egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Space)];
+        assert!(owns(&ctx, &listed, &space), "unless the app lists it");
+    }
 
-        assert!(claims(&ctx, space(), false), "Space clicks a focused button");
-        assert!(!claims(&ctx, space(), true), "a plot handle leaves it to the host");
-        assert!(claims(&ctx, Key::ArrowLeft, true), "and keeps the arrows it steps on");
-        assert!(claims(&ctx, Key::Escape, true), "and Escape, which drops its focus");
+    /// A numeric field being edited is a text field: a click puts egui's
+    /// `DragValue` into a `TextEdit` of its own.
+    #[test]
+    fn a_number_being_typed_owns_its_digits_but_not_unused_commands() {
+        use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
+        let ctx = egui::Context::default();
+        let mut value = 1.0_f32;
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                events,
+                ..Default::default()
+            };
+            let mut rect = Rect::NOTHING;
+            let _ = ctx.run_ui(raw, |ui| rect = ui.add(egui::DragValue::new(&mut value)).rect);
+            rect
+        };
+        let at = frame(vec![]).center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(vec![press(false)]);
+        frame(vec![]);
+        assert!(ctx.text_edit_focused(), "a click edits the number as text");
 
-        let unfocused = egui::Context::default();
-        assert!(!claims(&unfocused, Key::ArrowLeft, true), "without focus, nothing is claimed");
+        let event = |key: &str, code, modifiers| KeyboardEvent {
+            key: Key::Character(key.into()),
+            code,
+            modifiers,
+            state: KeyState::Down,
+            ..Default::default()
+        };
+        assert!(owns(&ctx, &[], &event("7", Code::Digit7, M::empty())));
+        assert!(!owns(&ctx, &[], &event("s", Code::KeyS, command())), "Cmd-S is the host's");
     }
 
     #[test]
@@ -1882,7 +2038,7 @@ mod key_capture_tests {
         let copy = (egui::Modifiers::COMMAND, Code::KeyC);
         let claims = |ctx, (modifiers, code)| {
             let event = KeyboardEvent { code, ..Default::default() };
-            egui_claims_key(ctx, modifiers, &event, false)
+            owns_key(ctx, &[], modifiers, &event)
         };
 
         let ctx = egui::Context::default();
@@ -1922,7 +2078,7 @@ mod key_capture_tests {
         use keyboard_types::{Key, KeyboardEvent};
         let claims = |ctx: &egui::Context, key: Key| {
             let event = KeyboardEvent { key, ..Default::default() };
-            egui_claims_key(ctx, egui::Modifiers::NONE, &event, false)
+            owns_key(ctx, &[], egui::Modifiers::NONE, &event)
         };
 
         let ctx = egui::Context::default();
@@ -1958,7 +2114,7 @@ mod key_capture_tests {
             ..Default::default()
         };
         assert!(
-            !egui_claims_key(&ctx, egui::Modifiers::COMMAND, &cut, false),
+            !owns_key(&ctx, &[], egui::Modifiers::COMMAND, &cut),
             "a cut means nothing on a label: the host cuts alone"
         );
         assert!(!claims(&ctx, Key::ArrowLeft), "the arrows stay the host's");
@@ -1978,11 +2134,8 @@ mod key_capture_tests {
     /// sits on is the one a shortcut matches.
     #[test]
     fn an_option_letter_is_matched_by_the_key_it_sits_on() {
-        use keyboard_types::{Code, Key, KeyState, KeyboardEvent, Modifiers as M};
-        let capture = KeyCapture::CaptureShortcuts(vec![egui::KeyboardShortcut::new(
-            egui::Modifiers::ALT,
-            egui::Key::A,
-        )]);
+        use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
+        let option_a = [egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::A)];
         let event = |code| KeyboardEvent {
             key: Key::Character("å".into()),
             code,
@@ -1990,8 +2143,31 @@ mod key_capture_tests {
             state: KeyState::Down,
             ..Default::default()
         };
-        assert_eq!(capture.status(&event(Code::KeyA), false), EventStatus::Captured);
-        assert_eq!(capture.status(&event(Code::KeyS), false), EventStatus::Ignored);
+        let ctx = egui::Context::default();
+        assert!(owns(&ctx, &option_a, &event(Code::KeyA)));
+        assert!(!owns(&ctx, &option_a, &event(Code::KeyS)));
+    }
+
+    #[test]
+    fn releasing_a_modifier_before_the_letter_does_not_leave_a_key_held() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let option_a = [egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::A)];
+        let ctx = egui::Context::default();
+        for (state, modifiers) in [
+            (KeyState::Down, M::ALT),
+            // Option is released before A; its release no longer matches the shortcut.
+            (KeyState::Up, M::empty()),
+            (KeyState::Down, M::ALT),
+        ] {
+            let event =
+                KeyboardEvent { key: Key::Character("a".into()), state, modifiers, ..Default::default() };
+            let events = queued(&event, owns(&ctx, &option_a, &event));
+            let modifiers = crate::translate::translate_modifiers(modifiers);
+            let raw = egui::RawInput { events, modifiers, focused: true, ..Default::default() };
+            let _ = ctx.run_ui(raw, |ui| {
+                assert_eq!(ui.input(|input| input.key_down(egui::Key::A)), state == KeyState::Down);
+            });
+        }
     }
 }
 

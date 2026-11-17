@@ -295,17 +295,23 @@ Texture deltas need no exemption: every pass renders (Patch 22), so a frame carr
 The same change also runs `free_textures` on all three render exits instead of only past the acquire:
 a `free`-only delta on a bailing frame used to drop egui's texture-manager ids permanently, leaking the retired atlas exactly when the backoff above forces a frame through on the strength of consuming that delta.
 `pass_due` (Patch 22's, which carries this backoff) and `after_render` are pure functions with their own tests in `egui-baseview`, which `ci.sh` runs.
-- **Patch 18** (`src/window.rs`, `src/translate.rs`): reserve app shortcuts from the host (#1433).
-`KeyCapture::CaptureShortcuts` captures its listed `egui::KeyboardShortcut`s even when no widget has keyboard focus, so the editor's appearance undo and redo (Cmd+Z, Cmd+Shift+Z, and Ctrl+Y off macOS) never reach the DAW while the editor window has the keyboard.
-Every other key still passes to the host unless egui has a use for it, which `egui_claims_key` decides:
-a focused widget takes every key, unless the app says through `Queue::set_focus_takes_only_arrows` that it uses just the arrows, when it keeps those and Escape, so Space still reaches the DAW after a click leaves a plot handle focused.
-A label holding a selection claims the copy chord (Cmd-C, Ctrl-Insert off macOS), which egui turns into its own copy, so the DAW does not copy too (#1608).
-An open memory-tracked popup claims Escape even without widget focus,
-so closing a combo box does not also send Escape to the DAW (#1659).
-A cut, copy or paste chord reaches egui only when egui claims the key, so Cmd-X with a label selected goes to the DAW alone rather than also copying the label (#1674).
-A label holding a selection claims Escape as well, which clears that selection (#1674);
+- **Patch 18** (`src/window.rs`, `src/translate.rs`): one rule for which keys the editor owns and which go to the host (#1433), shared by both plug-ins.
+Every key reaches the editor first, and `owns_key` decides from the state the last egui pass left;
+every key it does not own goes to the host.
+An open memory-tracked popup owns Escape, even without widget focus, so closing a combo box does not also send Escape to the DAW (#1659).
+A label holding a selection owns the copy chord, which egui turns into its own copy, so the DAW does not copy too (#1608),
+and Escape, which clears that selection (#1674);
 the arrows and Cmd-A, which move it, stay the host's, since a stray click on a label would otherwise take the arrows from the DAW.
-Each mode's capture decision is now one `KeyCapture::status`, replacing the per-mode branches in `on_event` and the separate wants-keyboard check after them, with its own test.
+A focused text field (`Context::text_edit_focused`, which a `DragValue` being typed into counts as) owns typing and TextEdit's editing keys (`text_edit_owns_key`),
+and a listed shortcut it does not use goes to the host.
+With no text field focused, the editor owns exactly the shortcuts the app lists with `Queue::set_shortcuts`, matched exactly,
+so the editor's undo and redo never reach the DAW while the editor window has the keyboard.
+A focused widget of another kind owns no key by its focus: Space and Enter after a click on a button, Tab and Escape, and a slider's arrows go to the host unless listed.
+A press the editor owns reaches egui, with its text or its cut, copy or paste (`queue_key`);
+a press it does not own never does, so one keystroke acts in one place,
+and Cmd-X with a label selected goes to the DAW alone.
+A release always reaches egui, so a key cannot stay held there when focus or modifiers changed after its press.
+It replaces upstream's `KeyCapture` modes and `Queue::set_key_capture`.
 `translate_virtual_key` lowercases a character before matching it,
 so Shift and Caps Lock letters still produce egui key events.
 - **Patch 19** (`src/window.rs` `wheel_delta`): flip a macOS wheel's x only while Shift is up (#1536).
@@ -360,7 +366,7 @@ while Cmd-0 does reach egui as `Num0` and resets the factor to 1.
 - **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
 egui's input state reads that field, and ends a pane drag on focus loss by it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
-AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no `CaptureShortcuts` entry.
+AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
