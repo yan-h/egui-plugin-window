@@ -33,7 +33,60 @@ pub(crate) fn translate_modifiers(modifiers: keyboard_types::Modifiers) -> egui:
     }
 }
 
-pub(crate) fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::Key> {
+/// The key a press means: its logical key, or the key it sits on where the
+/// logical one names no egui key. Option on a Mac types A as "å", which
+/// names none, so without the fallback ⌥A would match no shortcut and
+/// reach egui as no key; egui's winit integration falls back alike.
+pub(crate) fn translate_key(event: &keyboard_types::KeyboardEvent) -> Option<egui::Key> {
+    translate_virtual_key(&event.key).or_else(|| translate_physical_key(event.code))
+}
+
+fn translate_physical_key(code: keyboard_types::Code) -> Option<egui::Key> {
+    use egui::Key;
+    use keyboard_types::Code as C;
+
+    Some(match code {
+        C::Digit0 => Key::Num0,
+        C::Digit1 => Key::Num1,
+        C::Digit2 => Key::Num2,
+        C::Digit3 => Key::Num3,
+        C::Digit4 => Key::Num4,
+        C::Digit5 => Key::Num5,
+        C::Digit6 => Key::Num6,
+        C::Digit7 => Key::Num7,
+        C::Digit8 => Key::Num8,
+        C::Digit9 => Key::Num9,
+        C::KeyA => Key::A,
+        C::KeyB => Key::B,
+        C::KeyC => Key::C,
+        C::KeyD => Key::D,
+        C::KeyE => Key::E,
+        C::KeyF => Key::F,
+        C::KeyG => Key::G,
+        C::KeyH => Key::H,
+        C::KeyI => Key::I,
+        C::KeyJ => Key::J,
+        C::KeyK => Key::K,
+        C::KeyL => Key::L,
+        C::KeyM => Key::M,
+        C::KeyN => Key::N,
+        C::KeyO => Key::O,
+        C::KeyP => Key::P,
+        C::KeyQ => Key::Q,
+        C::KeyR => Key::R,
+        C::KeyS => Key::S,
+        C::KeyT => Key::T,
+        C::KeyU => Key::U,
+        C::KeyV => Key::V,
+        C::KeyW => Key::W,
+        C::KeyX => Key::X,
+        C::KeyY => Key::Y,
+        C::KeyZ => Key::Z,
+        _ => return None,
+    })
+}
+
+fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::Key> {
     use egui::Key;
     use keyboard_types::Key as K;
 

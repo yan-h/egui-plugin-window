@@ -11,7 +11,7 @@ Issue numbers such as #1551 are harmonigraph's (yan-h/harmonigraph), as are
 egui-baseview 0.3 pins;
 wired in via `[patch.crates-io]`, here and in each project, which covers both a direct dependency and egui-baseview's).
 - **Pruned to the macOS platform** (#1810): the X11 and Windows platforms, their Xlib, xkbcommon, GLX, connection-poller and Win32 wrappers, the macOS OpenGL context with the `opengl` and `uuid` features, and their target dependencies are gone.
-The `hitTest:` override stays as a pass-through of NSView's result, since its one case was the deleted OpenGL subview.
+The `hitTest:` override is gone with it (its `ViewImpl` method, registration and extern fn), since its one case was the deleted OpenGL subview; otonal's fork deleted it the same way.
 - **No-window platform off macOS** (`src/platform/none.rs`, from otonal's prune in yan-h/otonal#1557): no window opens, and everything else compiles, so a Linux cloud session builds the workspace and runs its headless tests.
 `open_parented` returns a handle that reports itself closed, `open_blocking` returns at once, and `Window` is uninhabited, so a build closure is never called.
 - **Patch** (3 lines, `src/wrappers/appkit/timer.rs`): register the macOS
@@ -102,6 +102,13 @@ Real drags are untouched:
 through one the button reads down.
 `ci.sh` runs the unit tests over the mask arithmetic.
 macOS only.
+- **Patch 8** (`src/platform/macos/view.rs`, `Cargo.toml`, `tests/host_keys.rs`; from otonal's fork): send unhandled keys to the host's view.
+A key-down, key-up or modifier change the handler returns `Ignored` for goes to the original parent `NSView`, held weakly, rather than to `super`;
+`super` takes it only for a view with no parent (an owned window), or once that parent no longer loads.
+Once the view moves into a window of its own, that window's responder chain ends without reaching the host, so `super` would drop the key.
+`tests/host_keys.rs` (no harness: AppKit needs the main thread) sends Cmd-S through real native views while docked, in their own window and redocked, and checks the host gets each ignored event once and no captured one;
+`cargo test -p baseview` runs it, so `ci.sh` does on macOS; elsewhere `ci.sh` only builds it.
+macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -110,7 +117,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, watchdog or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the `kCFRunLoop*` lines, the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link with its divisor, watchdog and frame timing, the withheld pointer exit, the synthesized release for a stuck button, and the no-window platform off macOS.
+keeping the `kCFRunLoop*` lines, the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link with its divisor, watchdog and frame timing, the withheld pointer exit, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -125,7 +132,7 @@ Off macOS the clipboard is copypasta's no-op context, since no window opens ther
 - **Patch 1** (2 call sites, `src/window.rs`): after a `Queue::resize()`,
 the window resize triggered by the physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
 on scaled displays the window/view ended up `pixels_per_point` times too large (2x-zoomed, bottom-left-anchored content on Retina).
-Convert with `points_per_pixel` at both call sites (build path and `on_frame`).
+Convert with `logical_size_for` at both call sites (build path and `on_frame`), at the native scale.
 - **Patch 2** (1 site, `src/window.rs` `on_frame`): texture deltas (font
 atlas rebuilds after `set_fonts`, new images) are only uploaded inside `render()`, but frames with no repaint due skip `render()` and drop the deltas permanently —
 glyph coordinates then point into a stale atlas (scrambled text).
@@ -209,6 +216,7 @@ so the view was never `Some`, and every frame reconfigured the surface to the si
 Rebuilding a swapchain per frame cost 0.5-3 ms, wandered on a ~1 s period as GPU load moved, and was unattributable:
 it read as "buffer uploads" on the perf overlay while `update_buffers` itself measured 0.3 ms. The term is now gated on `msaa_samples > 1`;
 `width`/`height` start at 0, so the first frame still configures.
+The condition is `surface_is_stale`, a pure function with its own test (from otonal's fork), which `ci.sh` runs.
 - **Patch 10** (`src/renderer/wgpu/renderer.rs` `layer_present` module +
 hooks, `Cargo.toml` objc2 deps):
 present a resize without the flash (issue #121's fold flicker).
@@ -225,7 +233,7 @@ the flag is captured there), folds new content and new bounds into one commit.
 Costs a main-thread wait per present, so it is not left on.
 - **Patch 11** (1 line, `src/window.rs`): keep the last pointer position when
 the pointer leaves.
-A press and a release are the two baseview events that carry no position of their own, so both are sent at `pointer_pos_in_points` —
+A press and a release are the two baseview events that carry no position of their own, so both are sent at the pointer's last position (`pointer_position`) —
 and both are DROPPED when it is `None`, which `CursorLeft` set.
 The release of a drag let go outside the window was therefore thrown away here, and egui, which deliberately keeps a drag alive across `PointerGone`, believed the button was held forever:
 every `ScrollArea` in the editor refuses the wheel while anything at all is being dragged (`end_stranded_drag` in `harmonigraph-ui` is the shell-side backstop for it).
@@ -330,6 +338,30 @@ A size from the `SizeSource` runs that frame's pass whatever the backoff says, s
 `Queue::longest_tick_gap` hands the app the longest gap between link frames since its last pass, measured on every frame, for its stall check.
 It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on the frame the idle poll drew on, and is retired whole with baseview Patch 7:
 `paced_divisor`, `PACE_MARGIN`, `MAX_FRAME_GAP`, `RESIZE_HOLD`, the restore of the chosen divisor on every event and the earliest-deadline keep for undrawn passes all went with it.
+- **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): one owner for a size a surface can be made at.
+`SurfaceSize` wraps a `PhySize` whose sides are neither zero nor past the device's texture limit (`Renderer::max_texture_side`, the device's own, not the font atlas cap of Patch 14).
+Its checking constructors take a physical size, or a logical size at the native scale through baseview's `WindowInfo::from_logical_size`, the arithmetic its `Resized` event reports with;
+a non-finite or non-positive size or scale saturates to zero or `u32::MAX` in that cast, which the check refuses.
+The window holds one and `Renderer::render` takes one, so the renderer has no size check of its own.
+A size from the `SizeSource`, an `InnerSize` command, a `Queue::resize` (recorded in the pass and applied after it, as the frame divisor is) and a `Resized` event go through it;
+one it refuses is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
+The opening size, which has nothing to fall back to, is clamped into 1 to the limit on each side instead.
+The device limit is read only when a size arrives.
+`SurfaceSize` and `logical_size_for` have their own tests.
+- **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
+The screen rect, pointer positions, pixel wheel deltas and `InnerSize` commands use the native scale times `Context::zoom_factor`, and `render` tessellates at the pass's `pixels_per_point`;
+physical sizes, logical host sizes and the viewport's `native_pixels_per_point` stay native.
+`points_per_pixel` is computed from the two rather than stored.
+Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger than its own and missed its pointer.
+The pointer's last position is kept in logical pixels and converted with the zoom of the event delivered at it, so a press after a zoom change with no move between lands under the pointer.
+A zoom takes effect only where a plug-in sets the factor itself:
+egui's keyboard zoom (Cmd-plus, Cmd-equals, Cmd-minus) never fires, since neither key table here produces `Plus`, `Equals` or `Minus`,
+while Cmd-0 does reach egui as `Num0` and resets the factor to 1.
+- **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
+egui's input state reads that field, and ends a pane drag on focus loss by it.
+- **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
+AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no `CaptureShortcuts` entry.
+Both the key event egui is sent and the shortcut match use it.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

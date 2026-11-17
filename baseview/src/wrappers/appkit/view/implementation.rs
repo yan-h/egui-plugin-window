@@ -63,7 +63,6 @@ pub unsafe fn create_view_class<V: ViewImpl>() -> &'static AnyClass {
             sel!(displayLinkFired:),
             display_link_fired::<V> as extern "C-unwind" fn(_, _, _),
         );
-        class.add_method(sel!(hitTest:), hit_test::<V> as extern "C-unwind" fn(_, _, _) -> _);
         class.add_method(
             sel!(updateTrackingAreas:),
             update_tracking_areas::<V> as extern "C-unwind" fn(_, _, _) -> _,
@@ -192,12 +191,6 @@ extern "C-unwind" fn view_did_change_backing_properties<V: ViewImpl>(
     this: &View<V>, _: Sel, _: &AnyObject,
 ) {
     V::view_did_change_backing_properties(this.inner_ref());
-}
-
-extern "C-unwind" fn hit_test<V: ViewImpl>(
-    this: &View<V>, _sel: Sel, point: NSPoint,
-) -> Option<&NSView> {
-    V::hit_test(this.inner_ref(), point)
 }
 
 extern "C-unwind" fn view_will_move_to_window<V: ViewImpl>(
