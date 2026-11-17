@@ -132,7 +132,7 @@ Off macOS the clipboard is copypasta's no-op context, since no window opens ther
 - **Patch 1** (2 call sites, `src/window.rs`): after a `Queue::resize()`,
 the window resize triggered by the physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
 on scaled displays the window/view ended up `pixels_per_point` times too large (2x-zoomed, bottom-left-anchored content on Retina).
-Convert with `points_per_pixel` at both call sites (build path and `on_frame`).
+Convert with `logical_size_for` at both call sites (build path and `on_frame`), at the native scale.
 - **Patch 2** (1 site, `src/window.rs` `on_frame`): texture deltas (font
 atlas rebuilds after `set_fonts`, new images) are only uploaded inside `render()`, but frames with no repaint due skip `render()` and drop the deltas permanently —
 glyph coordinates then point into a stale atlas (scrambled text).
@@ -216,6 +216,7 @@ so the view was never `Some`, and every frame reconfigured the surface to the si
 Rebuilding a swapchain per frame cost 0.5-3 ms, wandered on a ~1 s period as GPU load moved, and was unattributable:
 it read as "buffer uploads" on the perf overlay while `update_buffers` itself measured 0.3 ms. The term is now gated on `msaa_samples > 1`;
 `width`/`height` start at 0, so the first frame still configures.
+The condition is `surface_is_stale`, a pure function with its own test (from otonal's fork), which `ci.sh` runs.
 - **Patch 10** (`src/renderer/wgpu/renderer.rs` `layer_present` module +
 hooks, `Cargo.toml` objc2 deps):
 present a resize without the flash (issue #121's fold flicker).
@@ -337,6 +338,25 @@ A size from the `SizeSource` runs that frame's pass whatever the backoff says, s
 `Queue::longest_tick_gap` hands the app the longest gap between link frames since its last pass, measured on every frame, for its stall check.
 It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on the frame the idle poll drew on, and is retired whole with baseview Patch 7:
 `paced_divisor`, `PACE_MARGIN`, `MAX_FRAME_GAP`, `RESIZE_HOLD`, the restore of the chosen divisor on every event and the earliest-deadline keep for undrawn passes all went with it.
+- **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): check a size before any surface or texture is made at it.
+`valid_surface_size` refuses a side of zero or past the device's texture limit (`Renderer::max_texture_side`, the device's own, not the font atlas cap of Patch 14),
+and `physical_size_for` also refuses a non-finite or non-positive size or scale.
+A size from the `SizeSource` (in `prepare_frame_input`), an `InnerSize` command, a `Queue::resize` and a `Resized` event are checked;
+one that fails is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
+`render` bails on an invalid size before configuring the surface or making a multisample texture, after its uploads and through the same submit as an unavailable surface, so egui's one-time texture deltas are still consumed;
+otonal's fork returns at the top of `render` instead, which here would drop them (Patch 2).
+`physical_size_for`, `logical_size_for` and `prepare_frame_input` have their own tests.
+- **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
+The screen rect, pointer positions, pixel wheel deltas and `InnerSize` commands use the native scale times `Context::zoom_factor`, and `render` tessellates at the pass's `pixels_per_point`;
+physical sizes, logical host sizes and the viewport's `native_pixels_per_point` stay native.
+`points_per_pixel` is computed from the two rather than stored.
+Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger than its own and missed its pointer.
+egui zooms on Cmd-plus and Cmd-minus by default (`zoom_with_keyboard`), so those keys now zoom correctly rather than misdrawing.
+- **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
+egui's input state reads that field, and ends a pane drag on focus loss by it.
+- **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
+AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no `CaptureShortcuts` entry.
+Both the key event egui is sent and the shortcut match use it.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

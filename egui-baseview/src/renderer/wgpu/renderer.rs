@@ -538,14 +538,17 @@ impl Renderer {
         self.last_tess_ms
     }
 
-    pub fn font_atlas_max_texture_side(&self) -> usize {
-        let device_max = self
-            .render_state
+    /// The device's largest texture side, which bounds the surface too.
+    pub fn max_texture_side(&self) -> usize {
+        self.render_state
             .as_ref()
             .device
             .limits()
-            .max_texture_dimension_2d as usize;
-        crate::renderer::font_atlas_max_texture_side(device_max)
+            .max_texture_dimension_2d as usize
+    }
+
+    pub fn font_atlas_max_texture_side(&self) -> usize {
+        crate::renderer::font_atlas_max_texture_side(self.max_texture_side())
     }
 
     fn configure_surface(&self, width: u32, height: u32) {
@@ -778,14 +781,28 @@ impl Renderer {
         // with it five render passes, appeared to make "uploads" cheap.
         //
         // `width`/`height` start at 0, so the first frame still configures.
+        //
+        // A size no surface can take (zero, or past the device's texture
+        // limit) configures and allocates nothing. The frame bails as an
+        // unavailable surface does below, after its uploads, so egui's
+        // one-time texture deltas are still consumed.
+        if !crate::window::valid_surface_size(physical_size, self.max_texture_side()) {
+            self.free_textures(full_output);
+            self.render_state
+                .queue
+                .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
+            return false;
+        }
         #[cfg(target_os = "macos")]
         if self.width != canvas_width || self.height != canvas_height {
             self.layer_present.size_changed();
         }
-        if self.width != canvas_width
-            || self.height != canvas_height
-            || (self.msaa_samples > 1 && self.msaa_texture_view.is_none())
-        {
+        if surface_is_stale(
+            PhySize::new(self.width, self.height),
+            physical_size,
+            self.msaa_samples,
+            self.msaa_texture_view.is_some(),
+        ) {
             self.resize_and_generate_msaa_view(canvas_width, canvas_height);
         }
 
@@ -946,6 +963,57 @@ impl Renderer {
         self.last_submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
         true
+    }
+}
+
+/// Whether a frame at `size` rebuilds the surface before drawing: the first
+/// frame (`configured` starts at 0 by 0), a real resize, or multisampling on
+/// with its texture view missing. Only multisampling ever makes that view, so
+/// the missing-view test is gated on it; ungated, the default sample count
+/// would reconfigure an unchanged surface on every frame.
+fn surface_is_stale(
+    configured: PhySize,
+    size: PhySize,
+    msaa_samples: u32,
+    has_msaa_view: bool,
+) -> bool {
+    configured != size || (msaa_samples > 1 && !has_msaa_view)
+}
+
+#[cfg(test)]
+mod native_resize_surface_tests {
+    use super::*;
+
+    /// Configurations over a run of frames at `sizes`, with the renderer's
+    /// effect on each rebuild: the size recorded, and a multisample view made
+    /// when multisampling is on.
+    fn configurations(msaa_samples: u32, sizes: &[PhySize]) -> usize {
+        let (mut configured, mut has_msaa_view, mut count) = (PhySize::new(0, 0), false, 0);
+        for &size in sizes {
+            if surface_is_stale(configured, size, msaa_samples, has_msaa_view) {
+                configured = size;
+                has_msaa_view = msaa_samples > 1;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn native_resize_configures_a_fixed_size_surface_once_with_or_without_msaa() {
+        let fixed = [PhySize::new(1120, 640); 60];
+        let default_samples = RendererOptions::default().msaa_samples;
+        assert_eq!(configurations(default_samples, &fixed), 1, "default");
+        assert_eq!(configurations(4, &fixed), 1, "MSAA");
+        let resized = [
+            PhySize::new(1120, 640),
+            PhySize::new(1120, 640),
+            PhySize::new(1300, 750),
+            PhySize::new(1300, 750),
+        ];
+        for samples in [default_samples, 4] {
+            assert_eq!(configurations(samples, &resized), 2, "a real resize");
+        }
     }
 }
 
