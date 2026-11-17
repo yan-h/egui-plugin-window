@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use baseview::{
-    Event, EventStatus, PhySize, Size, Window, WindowHandle, WindowHandler, WindowOpenOptions,
-    WindowScalePolicy,
+    Event, EventStatus, PhySize, Size, Window, WindowHandle, WindowHandler, WindowInfo,
+    WindowOpenOptions, WindowScalePolicy,
 };
 use copypasta::ClipboardProvider;
 use egui::{Pos2, Rect, Rgba, ViewportCommand, pos2, vec2};
@@ -171,7 +171,7 @@ impl Default for EguiWindowSettings {
 pub struct Queue<'a> {
     bg_color: &'a mut Rgba,
     close_requested: &'a mut bool,
-    physical_size: &'a mut PhySize,
+    resize_request: &'a mut Option<PhySize>,
     key_capture: &'a mut KeyCapture,
     focus_takes_only_arrows: &'a mut bool,
     frame_divisor: &'a mut Option<u32>,
@@ -195,7 +195,7 @@ impl<'a> Queue<'a> {
     pub(crate) fn new(
         bg_color: &'a mut Rgba,
         close_requested: &'a mut bool,
-        physical_size: &'a mut PhySize,
+        resize_request: &'a mut Option<PhySize>,
         key_capture: &'a mut KeyCapture,
         focus_takes_only_arrows: &'a mut bool,
         frame_divisor: &'a mut Option<u32>,
@@ -219,7 +219,7 @@ impl<'a> Queue<'a> {
             //renderer,
             //repaint_requested,
             close_requested,
-            physical_size,
+            resize_request,
             key_capture,
             focus_takes_only_arrows,
             frame_divisor,
@@ -355,9 +355,11 @@ impl<'a> Queue<'a> {
         *self.bg_color = bg_color;
     }
 
-    /// Set size of the window.
+    /// Set size of the window, in physical pixels. Applied after the frame,
+    /// where the `Window` is reachable, unless no surface can be made at it,
+    /// when the window keeps its size.
     pub fn resize(&mut self, physical_size: PhySize) {
-        *self.physical_size = physical_size;
+        *self.resize_request = Some(physical_size);
     }
 
     /// Close the window.
@@ -438,21 +440,24 @@ where
     /// baseview reports a press and a release without one. `None` only before
     /// the first move — and it is not cleared when the pointer leaves, because
     /// a release still lands where the pointer was (see `CursorLeft`).
-    pointer_pos_in_points: Option<egui::Pos2>,
+    /// In logical (host) pixels, as baseview reports it, and converted to
+    /// points with the zoom of the event that is delivered at it, so a click
+    /// right after a zoom change lands where the pointer is.
+    pointer_position: Option<baseview::Point>,
     current_cursor_icon: baseview::MouseCursor,
 
     renderer: Renderer,
 
     clipboard_ctx: Option<Clipboard>,
 
-    physical_size: PhySize,
+    surface_size: SurfaceSize,
     /// See [`SizeSource`]: polled at the top of every frame, before the input
     /// that the frame is laid out from is built.
     size_source: Option<SizeSource>,
     scale_policy: WindowScalePolicy,
     /// The native backing scale: logical (host) pixels to physical pixels.
     /// egui's own scale is this times its zoom factor; see `points_per_pixel`.
-    pixels_per_point: f32,
+    native_scale: f32,
     bg_color: Rgba,
     close_requested: bool,
     /// When the UI next wants a pass, on the frame clock (see [`frame_at`]):
@@ -524,7 +529,7 @@ where
         let egui_ctx = egui::Context::default();
 
         // Assume scale for now until there is an event with a new one.
-        let pixels_per_point = match settings.scale_policy {
+        let native_scale = match settings.scale_policy {
             WindowScalePolicy::ScaleFactor(scale) => scale,
             WindowScalePolicy::SystemScaleFactor => 1.0,
         } as f32;
@@ -540,7 +545,7 @@ where
         let viewport_info = egui::ViewportInfo {
             parent: None,
             title: Some(settings.title),
-            native_pixels_per_point: Some(pixels_per_point),
+            native_pixels_per_point: Some(native_scale),
             focused: Some(true),
             inner_rect: Some(screen_rect),
             ..Default::default()
@@ -554,21 +559,20 @@ where
         };
         let _ = egui_input.viewports.insert(viewport_id, viewport_info);
 
-        let mut physical_size = PhySize {
-            width: (settings.logical_size.width * pixels_per_point as f64).round() as u32,
-            height: (settings.logical_size.height * pixels_per_point as f64).round() as u32,
-        };
+        let initial_size =
+            WindowInfo::from_logical_size(settings.logical_size, native_scale as f64)
+                .physical_size();
 
         let mut bg_color = Rgba::BLACK;
         let mut close_requested = false;
-        let old_physical_size = physical_size;
+        let mut resize_request = None;
         let mut key_capture = KeyCapture::default();
         let mut focus_takes_only_arrows = false;
         let mut frame_divisor = None;
         let mut queue = Queue::new(
             &mut bg_color,
             &mut close_requested,
-            &mut physical_size,
+            &mut resize_request,
             &mut key_capture,
             &mut focus_takes_only_arrows,
             &mut frame_divisor,
@@ -596,14 +600,17 @@ where
             window.set_frame_divisor(divisor);
         }
 
-        if !valid_surface_size(physical_size, renderer.max_texture_side()) {
-            physical_size = old_physical_size;
-        }
-        if physical_size != old_physical_size {
-            // `physical_size` is in physical pixels, but `Window::resize()`
-            // takes logical points; convert or the window ends up
-            // `pixels_per_point` times too large on scaled displays.
-            window.resize(logical_size_for(physical_size, pixels_per_point));
+        let limit = renderer.max_texture_side();
+        let requested = resize_request.and_then(|size| SurfaceSize::new(size, limit));
+        // The window's own size has no other size to fall back to, so it is
+        // clamped where a requested one is refused.
+        let surface_size =
+            requested.unwrap_or_else(|| SurfaceSize::clamped(initial_size, limit));
+        if let Some(size) = requested.filter(|size| size.get() != initial_size) {
+            // The size is in physical pixels, but `Window::resize()` takes
+            // logical points; convert or the window ends up `native_scale`
+            // times too large on scaled displays.
+            window.resize(logical_size_for(size, native_scale));
         }
 
         let clipboard_ctx = match Clipboard::new() {
@@ -625,16 +632,16 @@ where
             start_time,
             egui_time: 0.0,
             egui_input,
-            pointer_pos_in_points: None,
+            pointer_position: None,
             current_cursor_icon: baseview::MouseCursor::Default,
 
             renderer,
 
             clipboard_ctx,
 
-            physical_size,
+            surface_size,
             size_source: settings.size_source.clone(),
-            pixels_per_point,
+            native_scale,
             scale_policy: settings.scale_policy,
             bg_color,
             close_requested,
@@ -728,13 +735,6 @@ where
     /// wheel dead.
     fn update_modifiers(&mut self, modifiers: &Modifiers) {
         self.egui_input.modifiers = crate::translate::translate_modifiers(*modifiers);
-    }
-
-    /// egui points per physical pixel: the reciprocal of the native scale
-    /// times egui's zoom factor, as egui-winit computes it. Logical host
-    /// sizes stay native.
-    fn points_per_pixel(&self) -> f32 {
-        (self.pixels_per_point * self.egui_ctx.zoom_factor()).recip()
     }
 }
 
@@ -980,7 +980,7 @@ mod pass_due_tests {
     fn draw_gpu_queue_consumes_each_completion_once() {
         let mut color = Rgba::BLACK;
         let mut close = false;
-        let mut size = PhySize { width: 1, height: 1 };
+        let mut size = None;
         let mut capture = KeyCapture::default();
         let mut arrows_only = false;
         let mut divisor = None;
@@ -1150,19 +1150,17 @@ where
         // where the app does its own host-window duties. A size it gives runs
         // this frame's pass whatever the backoff says: the source hands it
         // over once, and only a pass applies it to the window.
-        let old_physical_size = self.physical_size;
-        let resized = prepare_frame_input(
-            &mut self.egui_input,
-            self.viewport_id,
-            &mut self.physical_size,
-            (self.pixels_per_point, self.egui_ctx.zoom_factor()),
-            self.renderer.max_texture_side(),
-            self.size_source.as_ref(),
-        );
+        let old_size = self.surface_size;
+        let resized = self.size_source.as_ref().and_then(SizeSource::take).and_then(|logical| {
+            SurfaceSize::from_logical(logical, self.native_scale, self.renderer.max_texture_side())
+        });
+        if let Some(size) = resized {
+            self.surface_size = size;
+        }
 
         let frame_at = frame_at(timing, tick_start);
         let asked = self.pass_request.asked();
-        if !resized && !pass_due(asked, self.repaint_after, self.retry_after, frame_at) {
+        if resized.is_none() && !pass_due(asked, self.repaint_after, self.retry_after, frame_at) {
             #[cfg(all(feature = "frame-log", target_os = "macos"))]
             crate::frame_log::end(crate::frame_log::Tick {
                 window: std::ptr::from_ref(self) as usize,
@@ -1180,16 +1178,20 @@ where
 
         self.egui_time = egui_time(self.egui_time, self.start_time, frame_at);
         self.egui_input.time = Some(self.egui_time);
+        set_screen_rect(
+            &mut self.egui_input,
+            self.viewport_id,
+            self.surface_size,
+            points_per_pixel(self.native_scale, self.egui_ctx.zoom_factor()),
+        );
 
-        // The size the pass is laid out at, which a size the pass asks for
-        // and no surface can take falls back to.
-        let pass_size = self.physical_size;
         //let mut repaint_requested = false;
         let mut frame_divisor = None;
+        let mut resize_request = None;
         let mut queue = Queue::new(
             &mut self.bg_color,
             &mut self.close_requested,
-            &mut self.physical_size,
+            &mut resize_request,
             &mut self.key_capture,
             &mut self.focus_takes_only_arrows,
             &mut frame_divisor,
@@ -1239,9 +1241,9 @@ where
                     // egui sizes in points; the window takes logical pixels.
                     let size = *size * self.egui_ctx.zoom_factor();
                     let logical = Size::new(size.x as f64, size.y as f64);
-                    if physical_size_for(
+                    if SurfaceSize::from_logical(
                         logical,
-                        self.pixels_per_point,
+                        self.native_scale,
                         self.renderer.max_texture_side(),
                     )
                     .is_some()
@@ -1253,13 +1255,15 @@ where
             }
         }
 
-        if !valid_surface_size(self.physical_size, self.renderer.max_texture_side()) {
-            self.physical_size = pass_size;
+        if let Some(size) = resize_request
+            .and_then(|size| SurfaceSize::new(size, self.renderer.max_texture_side()))
+        {
+            self.surface_size = size;
         }
-        if self.physical_size != old_physical_size {
+        if self.surface_size != old_size {
             // As in `new()`: convert physical pixels to the logical points
             // `Window::resize()` expects.
-            window.resize(logical_size_for(self.physical_size, self.pixels_per_point));
+            window.resize(logical_size_for(self.surface_size, self.native_scale));
         }
 
         // Copied out of the borrow so it stays readable after `render()` takes
@@ -1274,7 +1278,7 @@ where
         let presented = self.renderer.render(
             window,
             self.bg_color,
-            self.physical_size,
+            self.surface_size,
             // egui's scale for this pass, zoom included.
             full_output.pixels_per_point,
             &mut self.egui_ctx,
@@ -1387,36 +1391,30 @@ where
                 } => {
                     self.update_modifiers(modifiers);
 
+                    self.pointer_position = Some(*position);
                     let pos = pointer_in_points(position, self.egui_ctx.zoom_factor());
-                    self.pointer_pos_in_points = Some(pos);
                     self.egui_input.events.push(egui::Event::PointerMoved(pos));
                 }
                 baseview::MouseEvent::ButtonPressed { button, modifiers } => {
                     self.update_modifiers(modifiers);
 
-                    if let Some(pos) = self.pointer_pos_in_points
-                        && let Some(button) = crate::translate::translate_mouse_button(*button)
+                    let zoom = self.egui_ctx.zoom_factor();
+                    let modifiers = self.egui_input.modifiers;
+                    if let Some(event) =
+                        pointer_button(self.pointer_position, zoom, *button, true, modifiers)
                     {
-                        self.egui_input.events.push(egui::Event::PointerButton {
-                            pos,
-                            button,
-                            pressed: true,
-                            modifiers: self.egui_input.modifiers,
-                        });
+                        self.egui_input.events.push(event);
                     }
                 }
                 baseview::MouseEvent::ButtonReleased { button, modifiers } => {
                     self.update_modifiers(modifiers);
 
-                    if let Some(pos) = self.pointer_pos_in_points
-                        && let Some(button) = crate::translate::translate_mouse_button(*button)
+                    let zoom = self.egui_ctx.zoom_factor();
+                    let modifiers = self.egui_input.modifiers;
+                    if let Some(event) =
+                        pointer_button(self.pointer_position, zoom, *button, false, modifiers)
                     {
-                        self.egui_input.events.push(egui::Event::PointerButton {
-                            pos,
-                            button,
-                            pressed: false,
-                            modifiers: self.egui_input.modifiers,
-                        });
+                        self.egui_input.events.push(event);
                     }
                 }
                 baseview::MouseEvent::WheelScrolled {
@@ -1432,7 +1430,8 @@ where
 
                         baseview::ScrollDelta::Pixels { x, y } => (
                             egui::MouseWheelUnit::Point,
-                            egui::vec2(*x, *y) * self.points_per_pixel(),
+                            egui::vec2(*x, *y)
+                                * points_per_pixel(self.native_scale, self.egui_ctx.zoom_factor()),
                         ),
                     };
                     let shift = self.egui_input.modifiers.shift;
@@ -1522,35 +1521,30 @@ where
             }
             baseview::Event::Window(event) => match event {
                 baseview::WindowEvent::Resized(window_info) => {
-                    let pixels_per_point = match self.scale_policy {
+                    // A zero, non-finite or negative backing scale gives the
+                    // event a size no surface can be made at, so this refuses
+                    // it too. A fixed scale policy's scale is the app's own,
+                    // trusted as in `new()`.
+                    let Some(size) = SurfaceSize::new(
+                        window_info.physical_size(),
+                        self.renderer.max_texture_side(),
+                    ) else {
+                        return EventStatus::Ignored;
+                    };
+                    self.native_scale = match self.scale_policy {
                         WindowScalePolicy::ScaleFactor(scale) => scale,
                         WindowScalePolicy::SystemScaleFactor => window_info.scale(),
                     } as f32;
-                    if !pixels_per_point.is_finite()
-                        || pixels_per_point <= 0.0
-                        || !valid_surface_size(
-                            window_info.physical_size(),
-                            self.renderer.max_texture_side(),
-                        )
-                    {
-                        return EventStatus::Ignored;
-                    }
-                    self.pixels_per_point = pixels_per_point;
+                    self.surface_size = size;
 
-                    self.physical_size = window_info.physical_size();
-
-                    let screen_rect =
-                        calculate_screen_rect(self.physical_size, self.points_per_pixel());
-
-                    self.egui_input.screen_rect = Some(screen_rect);
-
+                    // The screen and viewport rects are built for the next
+                    // pass, from this size, before it runs.
                     let viewport_info = self
                         .egui_input
                         .viewports
                         .get_mut(&self.viewport_id)
                         .unwrap();
-                    viewport_info.native_pixels_per_point = Some(self.pixels_per_point);
-                    viewport_info.inner_rect = Some(screen_rect);
+                    viewport_info.native_pixels_per_point = Some(self.native_scale);
                 }
                 event @ (baseview::WindowEvent::Focused | baseview::WindowEvent::Unfocused) => {
                     update_focus_input(&mut self.egui_input, self.viewport_id, event);
@@ -1675,9 +1669,33 @@ fn update_focus_input(
     }
 }
 
+/// egui points per physical pixel: the reciprocal of the native scale times
+/// egui's zoom factor, as egui-winit computes it. Logical host sizes stay
+/// native.
+fn points_per_pixel(native_scale: f32, zoom: f32) -> f32 {
+    (native_scale * zoom).recip()
+}
+
 /// A cursor position in logical (host) pixels, in egui points under `zoom`.
 fn pointer_in_points(position: &baseview::Point, zoom: f32) -> Pos2 {
     pos2(position.x as f32, position.y as f32) / zoom
+}
+
+/// A press or release at the pointer's last position, in points under the
+/// zoom it is delivered at; `None` before the pointer has been seen.
+fn pointer_button(
+    position: Option<baseview::Point>,
+    zoom: f32,
+    button: baseview::MouseButton,
+    pressed: bool,
+    modifiers: egui::Modifiers,
+) -> Option<egui::Event> {
+    Some(egui::Event::PointerButton {
+        pos: pointer_in_points(&position?, zoom),
+        button: crate::translate::translate_mouse_button(button)?,
+        pressed,
+        modifiers,
+    })
 }
 
 /// Calculate screen rectangle in points.
@@ -1689,66 +1707,63 @@ fn calculate_screen_rect(physical_size: PhySize, points_per_pixel: f32) -> Rect 
     Rect::from_min_size(Pos2::new(0f32, 0f32), vec2(logical_size.0, logical_size.1))
 }
 
-/// Whether a surface and its textures can be made at `size`: neither side
-/// zero, and neither past the device's texture limit.
-pub(crate) fn valid_surface_size(size: PhySize, limit: usize) -> bool {
-    size.width > 0
-        && size.height > 0
-        && size.width as usize <= limit
-        && size.height as usize <= limit
+/// A size a surface and its textures can be made at: neither side zero, and
+/// neither past the device's texture limit. The renderer takes no other, so
+/// each writer of the window's size checks it here, once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceSize(PhySize);
+
+impl SurfaceSize {
+    pub(crate) fn new(size: PhySize, limit: usize) -> Option<Self> {
+        let fits = |side: u32| side > 0 && side as usize <= limit;
+        (fits(size.width) && fits(size.height)).then_some(Self(size))
+    }
+
+    /// The physical size of a logical one at the native scale, rounded as
+    /// baseview rounds the size its `Resized` event reports. A non-finite or
+    /// non-positive size or scale saturates to zero or `u32::MAX` in the cast,
+    /// which `new` refuses.
+    pub(crate) fn from_logical(logical: Size, native_scale: f32, limit: usize) -> Option<Self> {
+        Self::new(
+            WindowInfo::from_logical_size(logical, native_scale as f64).physical_size(),
+            limit,
+        )
+    }
+
+    /// The window's opening size, which has nothing to fall back to: each
+    /// side clamped into 1..=limit.
+    fn clamped(size: PhySize, limit: usize) -> Self {
+        let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+        Self(PhySize::new(size.width.min(limit).max(1), size.height.min(limit).max(1)))
+    }
+
+    pub(crate) fn get(self) -> PhySize {
+        self.0
+    }
 }
 
-fn logical_size_for(physical: PhySize, scale: f32) -> Size {
+fn logical_size_for(size: SurfaceSize, scale: f32) -> Size {
+    let physical = size.get();
     Size::new(
         physical.width as f64 / scale as f64,
         physical.height as f64 / scale as f64,
     )
 }
 
-fn physical_size_for(logical: Size, scale: f32, limit: usize) -> Option<PhySize> {
-    if !scale.is_finite()
-        || scale <= 0.0
-        || !logical.width.is_finite()
-        || !logical.height.is_finite()
-        || logical.width <= 0.0
-        || logical.height <= 0.0
-    {
-        return None;
-    }
-    let physical = PhySize::new(
-        (logical.width * scale as f64).round() as u32,
-        (logical.height * scale as f64).round() as u32,
-    );
-    valid_surface_size(physical, limit).then_some(physical)
-}
-
-/// The frame's size and screen rect, before the decision whether it runs a
-/// pass: the size the [`SizeSource`] gives, where a surface can take it, then
-/// the screen rect for the input the pass is laid out from. Returns whether
-/// the source gave such a size, which runs this frame's pass.
-/// `scale` is the native backing scale and `zoom` egui's zoom factor, so the
-/// screen rect is in points while the source's size stays in logical pixels.
-fn prepare_frame_input(
+/// The screen rect and the viewport's, in points, for the input a pass is
+/// laid out from: `points_per_pixel` carries egui's zoom, while `size` and
+/// the host's logical size stay native.
+fn set_screen_rect(
     input: &mut egui::RawInput,
     viewport_id: egui::ViewportId,
-    physical_size: &mut PhySize,
-    (scale, zoom): (f32, f32),
-    limit: usize,
-    source: Option<&SizeSource>,
-) -> bool {
-    let physical = source
-        .and_then(SizeSource::take)
-        .and_then(|logical| physical_size_for(logical, scale, limit));
-    if let Some(physical) = physical {
-        *physical_size = physical;
-    }
-    // The host's logical size is native; egui's points are zoomed.
-    let screen = calculate_screen_rect(*physical_size, (scale * zoom).recip());
+    size: SurfaceSize,
+    points_per_pixel: f32,
+) {
+    let screen = calculate_screen_rect(size.get(), points_per_pixel);
     input.screen_rect = Some(screen);
     if let Some(viewport) = input.viewports.get_mut(&viewport_id) {
         viewport.inner_rect = Some(screen);
     }
-    physical.is_some()
 }
 
 #[cfg(test)]
@@ -1983,31 +1998,23 @@ mod key_capture_tests {
 #[cfg(test)]
 mod resize_tests {
     use super::*;
-    use std::sync::Mutex;
 
+    /// A size from the source reaches the input the pass is laid out from,
+    /// in logical size, at both backing scales.
     #[test]
     fn native_resize_precedes_input_viewport_layout_and_surface_at_both_scales() {
         for scale in [1.0, 2.0] {
-            let latest = Arc::new(Mutex::new(Some(Size::new(1300.0, 750.0))));
-            let source = SizeSource::new({
-                let latest = latest.clone();
-                move || latest.lock().unwrap().take()
-            });
-            let mut input = egui::RawInput::default();
-            let mut surface_size = PhySize::new(1120, 640);
-            let resized = prepare_frame_input(
-                &mut input,
-                egui::ViewportId::ROOT,
-                &mut surface_size,
-                (scale, 1.0),
-                8192,
-                Some(&source),
-            );
-            assert!(resized);
+            let source = SizeSource::new(|| Some(Size::new(1300.0, 750.0)));
+            let size = source
+                .take()
+                .and_then(|logical| SurfaceSize::from_logical(logical, scale, 8192))
+                .unwrap();
             assert_eq!(
-                surface_size,
+                size.get(),
                 PhySize::new((1300.0 * scale) as u32, (750.0 * scale) as u32)
             );
+            let mut input = egui::RawInput::default();
+            set_screen_rect(&mut input, egui::ViewportId::ROOT, size, points_per_pixel(scale, 1.0));
             let context = egui::Context::default();
             let _ = context.run_ui(input, |ui| {
                 assert_eq!(
@@ -2017,27 +2024,20 @@ mod resize_tests {
                 assert_eq!(ui.ctx().input(|i| i.viewport_rect().size()), vec2(1300.0, 750.0));
                 assert!(ui.max_rect().width() <= 1300.0);
             });
-            // The source hands a size over once; the next frame keeps it.
-            let mut input = egui::RawInput::default();
-            assert!(!prepare_frame_input(
-                &mut input,
-                egui::ViewportId::ROOT,
-                &mut surface_size,
-                (scale, 1.0),
-                8192,
-                Some(&source),
-            ));
-            assert_eq!(surface_size.width, (1300.0 * scale) as u32);
         }
     }
 
     /// egui's zoom divides the logical window into fewer points, at both
-    /// backing scales, while the source keeps its logical size and the
+    /// backing scales, while the surface keeps its physical size and the
     /// viewport its native scale.
     #[test]
     fn native_resize_screen_and_pointer_points_account_for_zoom() {
         for scale in [1.0, 2.0] {
-            let source = SizeSource::new(|| Some(Size::new(1400.0, 800.0)));
+            let size = SurfaceSize::from_logical(Size::new(1400.0, 800.0), scale, 8192).unwrap();
+            assert_eq!(
+                size.get(),
+                PhySize::new((1400.0 * scale) as u32, (800.0 * scale) as u32)
+            );
             let mut input = egui::RawInput::default();
             let _ = input
                 .viewports
@@ -2045,19 +2045,7 @@ mod resize_tests {
                     native_pixels_per_point: Some(scale),
                     ..Default::default()
                 });
-            let mut surface_size = PhySize::new(1, 1);
-            prepare_frame_input(
-                &mut input,
-                egui::ViewportId::ROOT,
-                &mut surface_size,
-                (scale, 1.25),
-                8192,
-                Some(&source),
-            );
-            assert_eq!(
-                surface_size,
-                PhySize::new((1400.0 * scale) as u32, (800.0 * scale) as u32)
-            );
+            set_screen_rect(&mut input, egui::ViewportId::ROOT, size, points_per_pixel(scale, 1.25));
             assert_eq!(input.screen_rect.unwrap().size(), vec2(1120.0, 640.0));
             let context = egui::Context::default();
             context.options_mut(|options| options.zoom_factor = 1.25);
@@ -2068,6 +2056,28 @@ mod resize_tests {
             let corner = baseview::Point::new(1400.0, 800.0);
             assert_eq!(pointer_in_points(&corner, 1.25), pos2(1120.0, 640.0));
         }
+    }
+
+    /// A press with no move since the zoom changed lands where the pointer
+    /// is under the new zoom, not where the old one put it.
+    #[test]
+    fn a_press_after_a_zoom_change_lands_under_the_pointer() {
+        let seen = Some(baseview::Point::new(400.0, 200.0));
+        assert_eq!(pointer_in_points(&seen.unwrap(), 1.0), pos2(400.0, 200.0));
+        let press = pointer_button(
+            seen,
+            2.0,
+            baseview::MouseButton::Left,
+            true,
+            egui::Modifiers::NONE,
+        );
+        assert!(matches!(
+            press,
+            Some(egui::Event::PointerButton { pos, pressed: true, .. }) if pos == pos2(200.0, 100.0)
+        ));
+        let unseen =
+            pointer_button(None, 2.0, baseview::MouseButton::Left, true, egui::Modifiers::NONE);
+        assert!(unseen.is_none(), "no position before the pointer is seen");
     }
 
     #[test]
@@ -2096,20 +2106,34 @@ mod resize_tests {
     #[test]
     fn native_resize_child_takes_logical_units() {
         for scale in [1.0, 2.0] {
-            let physical = PhySize::new((800.0 * scale) as u32, (500.0 * scale) as u32);
-            assert_eq!(logical_size_for(physical, scale), Size::new(800.0, 500.0));
+            let size = SurfaceSize::new(
+                PhySize::new((800.0 * scale) as u32, (500.0 * scale) as u32),
+                8192,
+            )
+            .unwrap();
+            assert_eq!(logical_size_for(size, scale), Size::new(800.0, 500.0));
         }
     }
 
+    /// The one check every size passes before a surface or texture is made
+    /// at it, and the clamp for the opening size, which cannot be refused.
     #[test]
-    fn native_resize_rejects_dimensions_above_device_limit_before_allocation() {
+    fn a_surface_size_is_within_the_device_limit_and_never_zero() {
+        let logical = |w, h, scale| SurfaceSize::from_logical(Size::new(w, h), scale, 8192);
+        assert_eq!(logical(4096.0, 4096.0, 2.0).map(SurfaceSize::get), Some(PhySize::new(8192, 8192)));
+        assert_eq!(logical(4097.0, 4096.0, 2.0), None);
+        assert_eq!(logical(4096.0, 4096.0, 3.0), None);
+        assert_eq!(logical(f64::INFINITY, 360.0, 1.0), None);
+        assert_eq!(logical(f64::NAN, 360.0, 1.0), None);
+        assert_eq!(logical(0.0, 360.0, 1.0), None);
+        assert_eq!(logical(-640.0, 360.0, 1.0), None);
+        assert_eq!(logical(640.0, 360.0, 0.0), None);
+        assert_eq!(logical(640.0, 360.0, f32::NAN), None);
+        assert_eq!(SurfaceSize::new(PhySize::new(8193, 1), 8192), None);
+        assert_eq!(SurfaceSize::new(PhySize::new(1, 0), 8192), None);
         assert_eq!(
-            physical_size_for(Size::new(4096.0, 4096.0), 2.0, 8192),
-            Some(PhySize::new(8192, 8192))
+            SurfaceSize::clamped(PhySize::new(0, 9000), 8192).get(),
+            PhySize::new(1, 8192)
         );
-        assert_eq!(physical_size_for(Size::new(4097.0, 4096.0), 2.0, 8192), None);
-        assert_eq!(physical_size_for(Size::new(4096.0, 4096.0), 3.0, 8192), None);
-        assert_eq!(physical_size_for(Size::new(f64::INFINITY, 360.0), 1.0, 8192), None);
-        assert_eq!(physical_size_for(Size::new(0.0, 360.0), 1.0, 8192), None);
     }
 }

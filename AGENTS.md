@@ -43,3 +43,7 @@ is Yan's to decide, as in the projects.
     --config 'patch.crates-io.baseview.path="<this checkout>/baseview"' \
     --config 'patch.crates-io.egui-baseview.path="<this checkout>/egui-baseview"'
   ```
+
+  The override rewrites the two packages' `source` lines in that project's
+  `Cargo.lock`; restore it with `git checkout Cargo.lock` afterwards, and do
+  not commit it.

@@ -104,10 +104,10 @@ through one the button reads down.
 macOS only.
 - **Patch 8** (`src/platform/macos/view.rs`, `Cargo.toml`, `tests/host_keys.rs`; from otonal's fork): send unhandled keys to the host's view.
 A key-down, key-up or modifier change the handler returns `Ignored` for goes to the original parent `NSView`, held weakly, rather than to `super`;
-`super` takes it only for a view with no parent (an owned window).
+`super` takes it only for a view with no parent (an owned window), or once that parent no longer loads.
 Once the view moves into a window of its own, that window's responder chain ends without reaching the host, so `super` would drop the key.
 `tests/host_keys.rs` (no harness: AppKit needs the main thread) sends Cmd-S through real native views while docked, in their own window and redocked, and checks the host gets each ignored event once and no captured one;
-`cargo test -p baseview` runs it, so `ci.sh` does.
+`cargo test -p baseview` runs it, so `ci.sh` does on macOS; elsewhere `ci.sh` only builds it.
 macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
@@ -233,7 +233,7 @@ the flag is captured there), folds new content and new bounds into one commit.
 Costs a main-thread wait per present, so it is not left on.
 - **Patch 11** (1 line, `src/window.rs`): keep the last pointer position when
 the pointer leaves.
-A press and a release are the two baseview events that carry no position of their own, so both are sent at `pointer_pos_in_points` —
+A press and a release are the two baseview events that carry no position of their own, so both are sent at the pointer's last position (`pointer_position`) —
 and both are DROPPED when it is `None`, which `CursorLeft` set.
 The release of a drag let go outside the window was therefore thrown away here, and egui, which deliberately keeps a drag alive across `PointerGone`, believed the button was held forever:
 every `ScrollArea` in the editor refuses the wheel while anything at all is being dragged (`end_stranded_drag` in `harmonigraph-ui` is the shell-side backstop for it).
@@ -338,20 +338,25 @@ A size from the `SizeSource` runs that frame's pass whatever the backoff says, s
 `Queue::longest_tick_gap` hands the app the longest gap between link frames since its last pass, measured on every frame, for its stall check.
 It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on the frame the idle poll drew on, and is retired whole with baseview Patch 7:
 `paced_divisor`, `PACE_MARGIN`, `MAX_FRAME_GAP`, `RESIZE_HOLD`, the restore of the chosen divisor on every event and the earliest-deadline keep for undrawn passes all went with it.
-- **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): check a size before any surface or texture is made at it.
-`valid_surface_size` refuses a side of zero or past the device's texture limit (`Renderer::max_texture_side`, the device's own, not the font atlas cap of Patch 14),
-and `physical_size_for` also refuses a non-finite or non-positive size or scale.
-A size from the `SizeSource` (in `prepare_frame_input`), an `InnerSize` command, a `Queue::resize` and a `Resized` event are checked;
-one that fails is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
-`render` bails on an invalid size before configuring the surface or making a multisample texture, after its uploads and through the same submit as an unavailable surface, so egui's one-time texture deltas are still consumed;
-otonal's fork returns at the top of `render` instead, which here would drop them (Patch 2).
-`physical_size_for`, `logical_size_for` and `prepare_frame_input` have their own tests.
+- **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): one owner for a size a surface can be made at.
+`SurfaceSize` wraps a `PhySize` whose sides are neither zero nor past the device's texture limit (`Renderer::max_texture_side`, the device's own, not the font atlas cap of Patch 14).
+Its checking constructors take a physical size, or a logical size at the native scale through baseview's `WindowInfo::from_logical_size`, the arithmetic its `Resized` event reports with;
+a non-finite or non-positive size or scale saturates to zero or `u32::MAX` in that cast, which the check refuses.
+The window holds one and `Renderer::render` takes one, so the renderer has no size check of its own.
+A size from the `SizeSource`, an `InnerSize` command, a `Queue::resize` (recorded in the pass and applied after it, as the frame divisor is) and a `Resized` event go through it;
+one it refuses is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
+The opening size, which has nothing to fall back to, is clamped into 1 to the limit on each side instead.
+The device limit is read only when a size arrives.
+`SurfaceSize` and `logical_size_for` have their own tests.
 - **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
 The screen rect, pointer positions, pixel wheel deltas and `InnerSize` commands use the native scale times `Context::zoom_factor`, and `render` tessellates at the pass's `pixels_per_point`;
 physical sizes, logical host sizes and the viewport's `native_pixels_per_point` stay native.
 `points_per_pixel` is computed from the two rather than stored.
 Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger than its own and missed its pointer.
-egui zooms on Cmd-plus and Cmd-minus by default (`zoom_with_keyboard`), so those keys now zoom correctly rather than misdrawing.
+The pointer's last position is kept in logical pixels and converted with the zoom of the event delivered at it, so a press after a zoom change with no move between lands under the pointer.
+A zoom takes effect only where a plug-in sets the factor itself:
+egui's keyboard zoom (Cmd-plus, Cmd-equals, Cmd-minus) never fires, since neither key table here produces `Plus`, `Equals` or `Minus`,
+while Cmd-0 does reach egui as `Num0` and resets the factor to 1.
 - **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
 egui's input state reads that field, and ends a pane drag on focus loss by it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.

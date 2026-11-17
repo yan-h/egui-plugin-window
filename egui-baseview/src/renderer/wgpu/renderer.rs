@@ -659,11 +659,12 @@ impl Renderer {
         &mut self,
         window: &baseview::Window<'_>,
         bg_color: egui::Rgba,
-        physical_size: PhySize,
+        size: crate::window::SurfaceSize,
         pixels_per_point: f32,
         egui_ctx: &mut egui::Context,
         full_output: &mut FullOutput,
     ) -> bool {
+        let physical_size = size.get();
         let PhySize {
             width: canvas_width,
             height: canvas_height,
@@ -781,18 +782,6 @@ impl Renderer {
         // with it five render passes, appeared to make "uploads" cheap.
         //
         // `width`/`height` start at 0, so the first frame still configures.
-        //
-        // A size no surface can take (zero, or past the device's texture
-        // limit) configures and allocates nothing. The frame bails as an
-        // unavailable surface does below, after its uploads, so egui's
-        // one-time texture deltas are still consumed.
-        if !crate::window::valid_surface_size(physical_size, self.max_texture_side()) {
-            self.free_textures(full_output);
-            self.render_state
-                .queue
-                .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
-            return false;
-        }
         #[cfg(target_os = "macos")]
         if self.width != canvas_width || self.height != canvas_height {
             self.layer_present.size_changed();

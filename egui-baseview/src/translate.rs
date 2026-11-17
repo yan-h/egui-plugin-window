@@ -86,7 +86,7 @@ fn translate_physical_key(code: keyboard_types::Code) -> Option<egui::Key> {
     })
 }
 
-pub(crate) fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::Key> {
+fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::Key> {
     use egui::Key;
     use keyboard_types::Key as K;
 
