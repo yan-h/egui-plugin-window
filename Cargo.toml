@@ -1,0 +1,10 @@
+# One lockfile and one test command for the two crates. A project takes them
+# as git dependencies through its own `[patch.crates-io]`; this patch is the
+# same substitution for the tests here, since egui-baseview names baseview by
+# its crates.io version.
+[workspace]
+resolver = "2"
+members = ["baseview", "egui-baseview"]
+
+[patch.crates-io]
+baseview = { path = "baseview" }

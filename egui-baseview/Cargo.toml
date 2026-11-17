@@ -1,14 +1,5 @@
 # Cargo's normalized form of the published manifest, edited in place since
-# the fork was pruned to what harmonigraph compiles on macOS (PATCHES.md).
-
-# A workspace of its own, for the reason `vendor/baseview/Cargo.toml` carries
-# at more length: cargo skips an ancestor root whose `exclude` names this path
-# and keeps walking, so from a worktree under `.claude/worktrees/` the walk
-# passes the worktree's own root and reaches the MAIN checkout's, whose
-# `exclude` entries resolve under a different prefix and so exclude nothing
-# here. Without this table cargo refuses outright, and ci.sh runs `cargo test
-# --manifest-path` against this crate from exactly there.
-[workspace]
+# the crate was pruned to what compiles on macOS (PATCHES.md).
 
 [package]
 edition = "2024"

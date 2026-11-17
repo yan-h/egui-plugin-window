@@ -1,0 +1,47 @@
+# egui-plugin-window
+
+An egui editor window inside a plug-in host's view on macOS, drawn with wgpu.
+It is the windowing code under the editors of
+[harmonigraph](https://github.com/yan-h/harmonigraph) and otonal, two CLAP
+plug-ins that load into the same Bitwig Studio process, kept in one place so
+that a macOS windowing fix is written once.
+
+It is not a general library. Nothing here is published to crates.io, no
+platform but macOS opens a window, and no host but Bitwig is tested.
+
+## What is here
+
+- `baseview/`: the AppKit layer. A view parented into the host's, its frames
+  from the view's display link, and its mouse, key and window events.
+- `egui-baseview/`: egui on that view. It decides whether a frame runs the UI,
+  translates input, and renders with wgpu.
+
+Both began as crates.io releases (`baseview` 0.1.4, `egui-baseview` 0.3.0,
+MIT OR Apache-2.0, licenses in each directory) and are no longer reconciled
+with upstream. They keep those crate names so that a project's
+`[patch.crates-io]` selects them. `PATCHES.md` records what each changes from
+its release. Off macOS, `baseview` is a stub that opens no window, so a
+project's headless tests build on Linux.
+
+## Using it from a project
+
+Pin a commit in the project's root `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
+egui-baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
+```
+
+A change here reaches a project when that project moves its pin, in a pull
+request of its own.
+
+## Tests
+
+```
+./ci.sh
+```
+
+On macOS it runs both crates' tests; elsewhere it checks that they build.
+The `frame-log` feature of `egui-baseview` builds only against
+harmonigraph's patched wgpu-hal, so harmonigraph's CI builds it, not this one.
