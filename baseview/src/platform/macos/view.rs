@@ -73,19 +73,6 @@ pub(crate) struct BaseviewView {
     /// once the view is parented and invalidated by `close`. It retains the
     /// view, so a link that is never invalidated leaks it.
     display_link: Cell<Option<Retained<CADisplayLink>>>,
-    /// A slow timer that runs frames while the link is silent.
-    ///
-    /// A view's link stops dead while the view is hidden, or its window is
-    /// minimized or ordered out (measured; it keeps firing while merely
-    /// covered). The frame is also what ages the plugin's notes, lets an armed
-    /// take end itself (the plugin's input worker drains its rings, but leaves
-    /// both of these to an open editor's frames) and repairs a stuck button or
-    /// a withheld exit, and an editor that is open but out of sight must go on
-    /// doing all of them.
-    link_watchdog: Cell<Option<TimerHandle>>,
-    /// `CACurrentMediaTime` at the last link callback, which the watchdog
-    /// reads to tell a paused link from a running one.
-    last_link_fire: Cell<f64>,
     /// Draw on every Nth refresh; 1 is every refresh. See `link_paces_frame`.
     frame_divisor: Cell<u32>,
     /// The earliest target timestamp the next divided frame may aim at.
@@ -124,8 +111,6 @@ impl BaseviewView {
             buttons_seen_up: 0.into(),
             keyboard_state: KeyboardState::new(),
             display_link: None.into(),
-            link_watchdog: None.into(),
-            last_link_fire: 0.0.into(),
             frame_divisor: 1.into(),
             next_frame_due: None.into(),
             frame_timing: None.into(),
@@ -163,12 +148,6 @@ impl BaseviewView {
             // Parented by now, so the link starts on the screen the view is
             // on; it follows the view to another one by itself.
             view.display_link.set(Some(view.view.setup_display_link()));
-            let watchdog_view = Weak::new(view.view);
-            view.link_watchdog.set(TimerHandle::new(LINK_WATCHDOG_INTERVAL, move || {
-                if let Some(view) = watchdog_view.load() {
-                    Self::link_watchdog_fired(view.inner_ref());
-                }
-            }));
 
             let notifier_view = Weak::new(view.view);
             let observer = NotificationCenterObserver::register_window_key_change(move |n| {
@@ -211,7 +190,6 @@ impl BaseviewView {
         if let Some(link) = this.display_link.take() {
             link.invalidate();
         }
-        this.link_watchdog.take();
         this.view.removeFromSuperview();
 
         if let ViewParentingType::Windowed { owned_window: parent_window, running_app } =
@@ -292,14 +270,8 @@ impl BaseviewView {
         this.frame_timing.get()
     }
 
-    fn link_watchdog_fired(this: ViewRef<Self>) {
-        let silent = CACurrentMediaTime() - this.last_link_fire.get();
-        if silent > LINK_SILENCE {
-            Self::trigger_frame(this);
-        }
-    }
-
-    /// Run one frame, unless one is already running.
+    /// Run one frame, unless the view cannot be seen or a frame is already
+    /// running.
     ///
     /// The link is not the only caller — `handle_occlusion_notification`
     /// paints from inside a notification, and a notification can in principle
@@ -312,6 +284,23 @@ impl BaseviewView {
     /// it finishes. It is only this direction that is covered — `trigger_event`
     /// still borrows infallibly, and says so.
     fn trigger_frame(this: ViewRef<Self>) {
+        // A view nobody can see runs no frame: one hidden, or in a window
+        // covered, minimized, ordered out or on another Space. Asked of AppKit
+        // on every frame rather than kept from the occlusion notification, so
+        // it cannot go stale when a notification is lost. Its events still
+        // arrive meanwhile, and the first frame once it shows draws what they
+        // changed: the reveal's, run from `report_window_occlusion`, for a
+        // window coming back from occlusion; the next link callback, once the
+        // link resumes, for a view un-hidden in a visible window.
+        //
+        // Ahead of the settles as well: an unseen view has no gesture to
+        // settle. Whatever is owed then is paid once it shows, before anything
+        // is drawn from it: a withheld exit on the first frame, a stuck button
+        // on the second, since a release needs two settles to be confirmed.
+        if !Self::is_visible(this) {
+            return;
+        }
+
         // Before the frame, so a pointer that has quietly stopped being ours is
         // gone by the time anything is drawn from where it was. The button
         // first only to order the two within the settle: a release belongs
@@ -327,6 +316,17 @@ impl BaseviewView {
 
         handler.on_frame(&mut this.into());
         Self::send_deferred_events(this, handler.as_mut());
+    }
+
+    /// Whether any of the view can be on screen. AppKit's occlusion state is
+    /// conservative: a window with any part showing is visible.
+    ///
+    /// Three AppKit calls on every frame the link runs, which is every refresh
+    /// while the window is covered (a covered window's link keeps firing), so
+    /// nothing more is asked here.
+    fn is_visible(this: ViewRef<Self>) -> bool {
+        !this.view.isHiddenOrHasHiddenAncestor()
+            && this.view.window().is_some_and(|window| window_shows(&window))
     }
 
     /// Pay an exit `mouse_exited` held back, once no button is down.
@@ -475,7 +475,7 @@ impl BaseviewView {
     }
 
     fn report_window_occlusion(this: ViewRef<Self>, window: &NSWindow, paint_visible: bool) {
-        let visible = window.occlusionState().contains(NSWindowOcclusionState::Visible);
+        let visible = window_shows(window);
         // A repeated sample costs a whole off-cadence frame below, so it
         // stops here. Notifications are per window, not per embedded view;
         // attachment also samples once even if the new window has the same
@@ -488,9 +488,9 @@ impl BaseviewView {
         if visible && paint_visible {
             // Re-exposed, and what is on screen is the drawable from before
             // the window was hidden — the compositor keeps showing it until
-            // something presents over it, and nothing can present while the
-            // window is occluded (a drawable is refused, so the whole time it
-            // was hidden every frame was skipped).
+            // something presents over it, and nothing presents while the
+            // window is occluded (`trigger_frame` runs no frame for it, and a
+            // drawable would be refused if one ran).
             //
             // So the ghost lives exactly as long as it takes to get one frame
             // out, and this notification is the earliest that can happen: the
@@ -507,7 +507,9 @@ impl BaseviewView {
             //
             // The dirty mark is for whatever AppKit draws itself, which for a
             // surface-backed window is nothing; the frame is what puts new
-            // pixels up.
+            // pixels up. For a view that is not hidden it runs, because
+            // `trigger_frame` asks `window_shows` as this just did; a hidden
+            // one runs no frame here and draws once it is shown.
             this.view.setNeedsDisplay(true);
             Self::trigger_frame(this);
         }
@@ -527,14 +529,11 @@ impl BaseviewView {
     }
 }
 
-/// How often the watchdog checks on the display link, and so the frame rate
-/// of a view whose link has paused: enough to keep the plugin's notes ageing,
-/// its takes ending on time and a stuck button repaired.
-const LINK_WATCHDOG_INTERVAL: f64 = 0.1;
-
-/// How long the link must have been silent before the watchdog runs a frame
-/// itself. Far above any refresh interval, so a running link is never doubled.
-const LINK_SILENCE: f64 = 0.1;
+/// Whether any of `window` can be on screen, by its occlusion state: the
+/// window half of `is_visible`, and what an occlusion notification reports.
+fn window_shows(window: &NSWindow) -> bool {
+    window.occlusionState().contains(NSWindowOcclusionState::Visible)
+}
 
 /// Whether a link callback aimed at `target` runs a frame under `divisor`, and
 /// if so the earliest target the next one may aim at (`None` when undivided).
@@ -635,7 +634,6 @@ impl ViewImpl for BaseviewView {
     fn display_link_fired(this: ViewRef<Self>, link: &CADisplayLink) {
         let fired = CACurrentMediaTime();
         let fired_at = std::time::Instant::now();
-        this.last_link_fire.set(fired);
         let target = link.targetTimestamp();
         let refresh = link.duration();
         let divisor = this.frame_divisor.get();

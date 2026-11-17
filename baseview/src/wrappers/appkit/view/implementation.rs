@@ -208,8 +208,7 @@ extern "C-unwind" fn display_link_fired<V: ViewImpl>(
 ) {
     // Held for the whole callback: the frame can close the window, `close`
     // invalidates the link, and the link's retain may have been the view's
-    // last one. The frame timer this replaced held a strong reference the
-    // same way.
+    // last one.
     let _view = this.retain();
     V::display_link_fired(this.inner_ref(), link);
 }
