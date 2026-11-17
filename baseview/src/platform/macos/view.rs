@@ -288,12 +288,15 @@ impl BaseviewView {
         // covered, minimized, ordered out or on another Space. Asked of AppKit
         // on every frame rather than kept from the occlusion notification, so
         // it cannot go stale when a notification is lost. Its events still
-        // arrive meanwhile, and the first frame once it shows — the reveal's,
-        // run from `report_window_occlusion` — draws what they changed.
+        // arrive meanwhile, and the first frame once it shows draws what they
+        // changed: the reveal's, run from `report_window_occlusion`, for a
+        // window coming back from occlusion; the next link callback, once the
+        // link resumes, for a view un-hidden in a visible window.
         //
         // Ahead of the settles as well: an unseen view has no gesture to
-        // settle, and whatever is owed then (a release, a withheld exit) is
-        // paid on the first frame it shows, before anything is drawn.
+        // settle. Whatever is owed then is paid once it shows, before anything
+        // is drawn from it: a withheld exit on the first frame, a stuck button
+        // on the second, since a release needs two settles to be confirmed.
         if !Self::is_visible(this) {
             return;
         }
@@ -323,9 +326,7 @@ impl BaseviewView {
     /// nothing more is asked here.
     fn is_visible(this: ViewRef<Self>) -> bool {
         !this.view.isHiddenOrHasHiddenAncestor()
-            && this.view.window().is_some_and(|window| {
-                window.occlusionState().contains(NSWindowOcclusionState::Visible)
-            })
+            && this.view.window().is_some_and(|window| window_shows(&window))
     }
 
     /// Pay an exit `mouse_exited` held back, once no button is down.
@@ -474,7 +475,7 @@ impl BaseviewView {
     }
 
     fn report_window_occlusion(this: ViewRef<Self>, window: &NSWindow, paint_visible: bool) {
-        let visible = window.occlusionState().contains(NSWindowOcclusionState::Visible);
+        let visible = window_shows(window);
         // A repeated sample costs a whole off-cadence frame below, so it
         // stops here. Notifications are per window, not per embedded view;
         // attachment also samples once even if the new window has the same
@@ -506,8 +507,9 @@ impl BaseviewView {
             //
             // The dirty mark is for whatever AppKit draws itself, which for a
             // surface-backed window is nothing; the frame is what puts new
-            // pixels up. It runs because `trigger_frame` asks the same
-            // occlusion state this just read, and finds the window visible.
+            // pixels up. For a view that is not hidden it runs, because
+            // `trigger_frame` asks `window_shows` as this just did; a hidden
+            // one runs no frame here and draws once it is shown.
             this.view.setNeedsDisplay(true);
             Self::trigger_frame(this);
         }
@@ -525,6 +527,12 @@ impl BaseviewView {
             scale_factor,
         )
     }
+}
+
+/// Whether any of `window` can be on screen, by its occlusion state: the
+/// window half of `is_visible`, and what an occlusion notification reports.
+fn window_shows(window: &NSWindow) -> bool {
+    window.occlusionState().contains(NSWindowOcclusionState::Visible)
 }
 
 /// Whether a link callback aimed at `target` runs a frame under `divisor`, and

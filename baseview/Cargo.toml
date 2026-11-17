@@ -94,7 +94,6 @@ features = [
     "std",
     "CFString",
     "CFUUID",
-    "block2",
     "objc2",
 ]
 default-features = false

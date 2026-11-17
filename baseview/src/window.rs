@@ -98,7 +98,7 @@ impl<'a> Window<'a> {
     /// rather than a rate, because frames are driven by the display and can
     /// only land on its refreshes.
     ///
-    /// macOS only; a no-op elsewhere, where frames come from a fixed timer.
+    /// macOS only; a no-op elsewhere, where no window opens.
     pub fn set_frame_divisor(&mut self, divisor: u32) {
         #[cfg(target_os = "macos")]
         self.window.set_frame_divisor(divisor);
@@ -107,8 +107,8 @@ impl<'a> Window<'a> {
     }
 
     /// When the display asked for the frame now running, or `None` for a
-    /// frame nothing vsync-locked asked for: a repaint from a notification,
-    /// and every frame off macOS.
+    /// frame nothing vsync-locked asked for: a repaint from a notification.
+    /// Always `None` off macOS, where no window opens.
     pub fn frame_timing(&self) -> Option<crate::FrameTiming> {
         #[cfg(target_os = "macos")]
         return self.window.frame_timing();
