@@ -298,20 +298,28 @@ a `free`-only delta on a bailing frame used to drop egui's texture-manager ids p
 - **Patch 18** (`src/window.rs`, `src/translate.rs`): one rule for which keys the editor owns and which go to the host (#1433), shared by both plug-ins.
 Every key reaches the editor first, and `owns_key` decides from the state the last egui pass left;
 every key it does not own goes to the host.
-An open memory-tracked popup owns Escape, even without widget focus, so closing a combo box does not also send Escape to the DAW (#1659).
-A label holding a selection owns the copy chord, which egui turns into its own copy, so the DAW does not copy too (#1608),
-and Escape, which clears that selection (#1674);
+Only a press is owned: every release and every modifier-only event goes to the host as well as to egui,
+so the host never loses the release of a key it saw go down, nor a modifier change.
+The host does receive the release of a key it never saw go down, as it already does after Enter or Escape ends a field.
+The egui-internal claims take the bare chord only, so a host command on the same key with another modifier (Cmd-Shift-C) stays the host's.
+A drag in progress owns bare Escape, which egui cancels it on (`interaction::interact`), since its widget's focus no longer keeps the key.
+An open memory-tracked popup owns bare Escape, even without widget focus, so closing a combo box does not also send Escape to the DAW (#1659).
+A label holding a selection owns bare Cmd-C, which egui turns into its own copy, so the DAW does not copy too (#1608),
+and bare Escape, which clears that selection (#1674);
 the arrows and Cmd-A, which move it, stay the host's, since a stray click on a label would otherwise take the arrows from the DAW.
 A focused text field (`Context::text_edit_focused`, which a `DragValue` being typed into counts as) owns typing and TextEdit's editing keys (`text_edit_owns_key`),
 and a listed shortcut it does not use goes to the host.
+That table mirrors egui 0.35's TextEdit event handling, `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs` and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs`,
+so an egui upgrade re-derives it from them.
+Its clipboard chords are any Command chord on C, X or V, as both forks read them.
 With no text field focused, the editor owns exactly the shortcuts the app lists with `Queue::set_shortcuts`, matched exactly,
 so the editor's undo and redo never reach the DAW while the editor window has the keyboard.
 A focused widget of another kind owns no key by its focus: Space and Enter after a click on a button, Tab and Escape, and a slider's arrows go to the host unless listed.
-A press the editor owns reaches egui, with its text or its cut, copy or paste (`queue_key`);
+A press the editor owns reaches egui, with its text or its cut, copy or paste (`queue_key`, classified once by `press_sends`);
 a press it does not own never does, so one keystroke acts in one place,
 and Cmd-X with a label selected goes to the DAW alone.
 A release always reaches egui, so a key cannot stay held there when focus or modifiers changed after its press.
-It replaces upstream's `KeyCapture` modes and `Queue::set_key_capture`.
+It replaces upstream's `KeyCapture` modes, `Queue::set_key_capture` and the `keyboard_types::Key` re-export they used.
 `translate_virtual_key` lowercases a character before matching it,
 so Shift and Caps Lock letters still produce egui key events.
 - **Patch 19** (`src/window.rs` `wheel_delta`): flip a macOS wheel's x only while Shift is up (#1536).
@@ -362,7 +370,7 @@ Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger 
 The pointer's last position is kept in logical pixels and converted with the zoom of the event delivered at it, so a press after a zoom change with no move between lands under the pointer.
 A zoom takes effect only where a plug-in sets the factor itself:
 egui's keyboard zoom (Cmd-plus, Cmd-equals, Cmd-minus) never fires, since neither key table here produces `Plus`, `Equals` or `Minus`,
-while Cmd-0 does reach egui as `Num0` and resets the factor to 1.
+and Cmd-0, which egui reads as a reset to 1, reaches egui only where a plug-in lists it as a shortcut (Patch 18), and otherwise goes to the host alone.
 - **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
 egui's input state reads that field, and ends a pane drag on focus loss by it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
