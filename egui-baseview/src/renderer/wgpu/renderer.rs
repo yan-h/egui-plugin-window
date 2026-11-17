@@ -820,13 +820,14 @@ impl Renderer {
                 // egui's per-frame vertex, index and texture data into the
                 // queue's pending writes, and those staging buffers are only
                 // reclaimed by a submit() (via wgpu-core's pre_submit). Returning
-                // without submitting strands them: a backgrounded window whose
-                // surface reports Occluded/Timeout on every frame then piles
-                // up staging buffers at the frame rate — gigabytes within minutes
-                // — freed only when it regains focus and the next presented
+                // without submitting strands them: a window whose surface
+                // reports Occluded/Timeout on every frame (baseview runs none
+                // for a window it reads as occluded, but wgpu-hal reads a
+                // different one) piles up staging buffers at the frame rate —
+                // gigabytes within minutes — freed only when the next presented
                 // frame's submit drains the whole backlog at once. No drawable
                 // was acquired, so this submits the uploads without presenting;
-                // the window stays frozen (expected while hidden) but flat.
+                // the window stays frozen but flat.
                 self.free_textures(full_output);
                 self.render_state
                     .queue

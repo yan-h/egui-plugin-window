@@ -1,5 +1,4 @@
 mod notification_center;
-mod timer;
 mod view;
 mod window;
 
@@ -9,7 +8,6 @@ use objc2_core_foundation::CFUUID;
 use std::ffi::CString;
 
 pub use notification_center::*;
-pub use timer::TimerHandle;
 pub use view::*;
 pub use window::*;
 
