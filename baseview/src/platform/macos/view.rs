@@ -258,6 +258,15 @@ impl BaseviewView {
         status
     }
 
+    /// The host still owns unhandled keys when its editor view moves to
+    /// another window. That window's responder chain cannot reach the host.
+    fn host_view(this: ViewRef<Self>) -> Option<Retained<NSView>> {
+        match &this.parenting {
+            ViewParentingType::Parented { parent_view } => parent_view.load(),
+            ViewParentingType::Windowed { .. } => None,
+        }
+    }
+
     /// Trigger the event immediately if `window_handler` can be borrowed mutably,
     /// otherwise add the event to a queue that will be cleared once `window_handler`'s mutable borrow ends.
     /// As this method might result in the event triggering asynchronously, it can't reliably return the event status.
@@ -595,24 +604,6 @@ impl ViewImpl for BaseviewView {
         }
     }
 
-    /// `hitTest:` override that passes NSView's own result through.
-    ///
-    /// Upstream it collapsed hits on baseview's OpenGL render subview to
-    /// this view, so the first click in a non-key window reached
-    /// `mouseDown:` (baseview#129 / #202 / #169). That subview went with the
-    /// `opengl` feature, and the override stays as a pass-through so that
-    /// pruning the fork changed nothing macOS compiles to.
-    fn hit_test(this: ViewRef<'_, Self>, point: NSPoint) -> Option<&NSView> {
-        let superclass = this.view.class().superclass().unwrap();
-
-        // SAFETY: Our superclass is NSView
-        let super_result: Option<&NSView> =
-            unsafe { msg_send![super(this.view, superclass), hitTest: point] };
-        let super_result = super_result?;
-
-        Some(super_result)
-    }
-
     fn view_will_move_to_window(this: ViewRef<Self>, new_window: Option<&NSWindow>) {
         let tracking_areas = this.view.trackingAreas();
 
@@ -934,10 +925,14 @@ impl ViewImpl for BaseviewView {
             let status = Self::trigger_event(this, Event::Keyboard(key_event));
 
             if let EventStatus::Ignored = status {
-                unsafe {
-                    let superclass = msg_send![this.view, superclass];
+                if let Some(host) = Self::host_view(this) {
+                    host.keyDown(event);
+                } else {
+                    unsafe {
+                        let superclass = msg_send![this.view, superclass];
 
-                    let () = msg_send![super(this.view, superclass), keyDown:event];
+                        let () = msg_send![super(this.view, superclass), keyDown:event];
+                    }
                 }
             }
         }
@@ -948,10 +943,14 @@ impl ViewImpl for BaseviewView {
             let status = Self::trigger_event(this, Event::Keyboard(key_event));
 
             if let EventStatus::Ignored = status {
-                unsafe {
-                    let superclass = msg_send![this.view, superclass];
+                if let Some(host) = Self::host_view(this) {
+                    host.keyUp(event);
+                } else {
+                    unsafe {
+                        let superclass = msg_send![this.view, superclass];
 
-                    let () = msg_send![super(this.view, superclass), keyUp:event];
+                        let () = msg_send![super(this.view, superclass), keyUp:event];
+                    }
                 }
             }
         }
@@ -962,10 +961,14 @@ impl ViewImpl for BaseviewView {
             let status = Self::trigger_event(this, Event::Keyboard(key_event));
 
             if let EventStatus::Ignored = status {
-                unsafe {
-                    let superclass = msg_send![this.view, superclass];
+                if let Some(host) = Self::host_view(this) {
+                    host.flagsChanged(event);
+                } else {
+                    unsafe {
+                        let superclass = msg_send![this.view, superclass];
 
-                    let () = msg_send![super(this.view, superclass), flagsChanged:event];
+                        let () = msg_send![super(this.view, superclass), flagsChanged:event];
+                    }
                 }
             }
         }

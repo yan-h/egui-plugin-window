@@ -11,7 +11,7 @@ Issue numbers such as #1551 are harmonigraph's (yan-h/harmonigraph), as are
 egui-baseview 0.3 pins;
 wired in via `[patch.crates-io]`, here and in each project, which covers both a direct dependency and egui-baseview's).
 - **Pruned to the macOS platform** (#1810): the X11 and Windows platforms, their Xlib, xkbcommon, GLX, connection-poller and Win32 wrappers, the macOS OpenGL context with the `opengl` and `uuid` features, and their target dependencies are gone.
-The `hitTest:` override stays as a pass-through of NSView's result, since its one case was the deleted OpenGL subview.
+The `hitTest:` override is gone with it (its `ViewImpl` method, registration and extern fn), since its one case was the deleted OpenGL subview; otonal's fork deleted it the same way.
 - **No-window platform off macOS** (`src/platform/none.rs`, from otonal's prune in yan-h/otonal#1557): no window opens, and everything else compiles, so a Linux cloud session builds the workspace and runs its headless tests.
 `open_parented` returns a handle that reports itself closed, `open_blocking` returns at once, and `Window` is uninhabited, so a build closure is never called.
 - **Patch** (3 lines, `src/wrappers/appkit/timer.rs`): register the macOS
@@ -102,6 +102,13 @@ Real drags are untouched:
 through one the button reads down.
 `ci.sh` runs the unit tests over the mask arithmetic.
 macOS only.
+- **Patch 8** (`src/platform/macos/view.rs`, `Cargo.toml`, `tests/host_keys.rs`; from otonal's fork): send unhandled keys to the host's view.
+A key-down, key-up or modifier change the handler returns `Ignored` for goes to the original parent `NSView`, held weakly, rather than to `super`;
+`super` takes it only for a view with no parent (an owned window).
+Once the view moves into a window of its own, that window's responder chain ends without reaching the host, so `super` would drop the key.
+`tests/host_keys.rs` (no harness: AppKit needs the main thread) sends Cmd-S through real native views while docked, in their own window and redocked, and checks the host gets each ignored event once and no captured one;
+`cargo test -p baseview` runs it, so `ci.sh` does.
+macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -110,7 +117,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, watchdog or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the `kCFRunLoop*` lines, the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link with its divisor, watchdog and frame timing, the withheld pointer exit, the synthesized release for a stuck button, and the no-window platform off macOS.
+keeping the `kCFRunLoop*` lines, the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link with its divisor, watchdog and frame timing, the withheld pointer exit, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 

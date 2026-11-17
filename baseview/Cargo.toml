@@ -45,6 +45,11 @@ default = []
 name = "baseview"
 path = "src/lib.rs"
 
+[[test]]
+name = "host_keys"
+path = "tests/host_keys.rs"
+harness = false
+
 [dependencies.keyboard-types]
 version = "0.6.1"
 default-features = false

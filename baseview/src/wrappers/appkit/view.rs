@@ -3,7 +3,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel, Encoding, Message, RefEncode};
 use objc2_app_kit::{NSDragOperation, NSDraggingInfo, NSEvent, NSView, NSWindow};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSNotification, NSPoint, NSRunLoop, NSRunLoopCommonModes};
+use objc2_foundation::{NSNotification, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitWindowHandle, HasRawWindowHandle, RawWindowHandle};
 use std::ffi::{c_void, CStr};
@@ -129,7 +129,6 @@ pub trait ViewImpl: Sized {
     fn resign_first_responder(this: ViewRef<Self>) -> bool;
     fn window_should_close(this: ViewRef<Self>) -> bool;
     fn view_did_change_backing_properties(this: ViewRef<Self>);
-    fn hit_test(this: ViewRef<'_, Self>, point: NSPoint) -> Option<&NSView>;
     fn view_will_move_to_window(this: ViewRef<Self>, new_window: Option<&NSWindow>);
     fn view_did_move_to_window(this: ViewRef<Self>);
     fn display_link_fired(this: ViewRef<Self>, link: &CADisplayLink);
