@@ -406,11 +406,16 @@ impl OwnWindow {
 
     /// A size the editor asked for itself (a pane folding sideways, a
     /// restore), given to its own window instead of to the host, from the
-    /// window's top-left corner. Returns the content size AppKit applied,
+    /// window's top-left corner, within the limits as last given: AppKit
+    /// holds a frame set in code to none. Returns the content size applied,
     /// which the editor takes, or `None` while the view is in the host's
     /// window.
     pub fn resize(&self, size: (u32, u32)) -> Option<(u32, u32)> {
-        let window = self.state().borrow().window.clone()?;
+        let (window, limits) = {
+            let state = self.state().borrow();
+            (state.window.clone()?, state.limits)
+        };
+        let size = limits.map_or(size, |limits| limits.clamp(size));
         let applied = set_content_size(&window, ns_size(size));
         self.state().borrow_mut().size = applied;
         Some(applied)
@@ -427,10 +432,16 @@ impl OwnWindow {
         self.local().close();
     }
 
-    /// The move [`Self::want`] deferred, off the run loop.
+    /// The move [`Self::want`] deferred, off the run loop. None once the
+    /// host has been told the window closed: the editor is on its way out,
+    /// and a dock would ask the host for its size as it goes.
     fn apply(&self) {
         let mtm = main_thread();
-        let wanted = self.state().borrow_mut().wanted.take();
+        let wanted = {
+            let mut state = self.state().borrow_mut();
+            let wanted = state.wanted.take();
+            wanted.filter(|_| !state.closing)
+        };
         match wanted {
             Some(true) => self.pop(mtm),
             Some(false) => self.dock(),
