@@ -69,6 +69,11 @@
 //! Off macOS nothing moves: [`OwnWindow::offered`] is false and every other
 //! call does nothing.
 //!
+//! [`EditorSize`] runs that sequence for a shell: the editor's size, its
+//! negotiation with the host, and the own window, so a shell supplies the
+//! window's name, the limits, the saved choice of window, the close callback
+//! and the host's `request_resize`, and calls [`OwnWindow`] through it.
+//!
 //! Where it came from, and what it took from each plug-in's copy, is in
 //! `PATCHES.md` at the repository's root.
 
@@ -81,6 +86,9 @@ pub use macos::OwnWindow;
 mod elsewhere;
 #[cfg(not(target_os = "macos"))]
 pub use elsewhere::OwnWindow;
+
+mod size;
+pub use size::{EditorSize, Opened};
 
 /// The sizes the own window may be resized to by the player, in logical
 /// points, as the plug-in's shell bounds the editor.
