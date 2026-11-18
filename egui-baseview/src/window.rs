@@ -181,7 +181,6 @@ impl Default for EguiWindowSettings {
 pub struct Queue<'a> {
     bg_color: &'a mut Rgba,
     close_requested: &'a mut bool,
-    resize_request: &'a mut Option<PhySize>,
     shortcuts: &'a mut Vec<egui::KeyboardShortcut>,
     frame_divisor: &'a mut Option<u32>,
     frame_timing: Option<baseview::FrameTiming>,
@@ -204,7 +203,6 @@ impl<'a> Queue<'a> {
     pub(crate) fn new(
         bg_color: &'a mut Rgba,
         close_requested: &'a mut bool,
-        resize_request: &'a mut Option<PhySize>,
         shortcuts: &'a mut Vec<egui::KeyboardShortcut>,
         frame_divisor: &'a mut Option<u32>,
         frame_timing: Option<baseview::FrameTiming>,
@@ -227,7 +225,6 @@ impl<'a> Queue<'a> {
             //renderer,
             //repaint_requested,
             close_requested,
-            resize_request,
             shortcuts,
             frame_divisor,
             frame_timing,
@@ -360,13 +357,6 @@ impl<'a> Queue<'a> {
     /// Set the background color.
     pub fn bg_color(&mut self, bg_color: Rgba) {
         *self.bg_color = bg_color;
-    }
-
-    /// Set size of the window, in physical pixels. Applied after the frame,
-    /// where the `Window` is reachable, unless no surface can be made at it,
-    /// when the window keeps its size.
-    pub fn resize(&mut self, physical_size: PhySize) {
-        *self.resize_request = Some(physical_size);
     }
 
     /// Close the window.
@@ -520,13 +510,11 @@ where
 
         let mut bg_color = Rgba::BLACK;
         let mut close_requested = false;
-        let mut resize_request = None;
         let mut shortcuts = Vec::new();
         let mut frame_divisor = None;
         let mut queue = Queue::new(
             &mut bg_color,
             &mut close_requested,
-            &mut resize_request,
             &mut shortcuts,
             &mut frame_divisor,
             // The build runs outside any frame the display asked for.
@@ -553,18 +541,9 @@ where
             window.set_frame_divisor(divisor);
         }
 
-        let limit = renderer.max_texture_side();
-        let requested = resize_request.and_then(|size| SurfaceSize::new(size, limit));
         // The window's own size has no other size to fall back to, so it is
-        // clamped where a requested one is refused.
-        let surface_size =
-            requested.unwrap_or_else(|| SurfaceSize::clamped(initial_size, limit));
-        if let Some(size) = requested.filter(|size| size.get() != initial_size) {
-            // The size is in physical pixels, but `Window::resize()` takes
-            // logical points; convert or the window ends up `native_scale`
-            // times too large on scaled displays.
-            window.resize(logical_size_for(size, native_scale));
-        }
+        // clamped where a size from elsewhere would be refused.
+        let surface_size = SurfaceSize::clamped(initial_size, renderer.max_texture_side());
 
         let clipboard_ctx = match Clipboard::new() {
             Ok(clipboard_ctx) => Some(clipboard_ctx),
@@ -941,13 +920,12 @@ mod pass_due_tests {
     fn draw_gpu_queue_consumes_each_completion_once() {
         let mut color = Rgba::BLACK;
         let mut close = false;
-        let mut size = None;
         let mut shortcuts = Vec::new();
         let mut divisor = None;
         let mut completed = Vec::new();
         for sample in [Some(2.0), None, None, None, None, Some(10.0), None] {
             let mut queue = Queue::new(
-                &mut color, &mut close, &mut size, &mut shortcuts, &mut divisor,
+                &mut color, &mut close, &mut shortcuts, &mut divisor,
                 None, None,
                 0.0, sample, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0,
             );
@@ -1144,11 +1122,9 @@ where
 
         //let mut repaint_requested = false;
         let mut frame_divisor = None;
-        let mut resize_request = None;
         let mut queue = Queue::new(
             &mut self.bg_color,
             &mut self.close_requested,
-            &mut resize_request,
             &mut self.shortcuts,
             &mut frame_divisor,
             timing,
@@ -1193,32 +1169,14 @@ where
                 ViewportCommand::Close => {
                     window.close();
                 }
-                ViewportCommand::InnerSize(size) => {
-                    // egui sizes in points; the window takes logical pixels.
-                    let size = *size * self.egui_ctx.zoom_factor();
-                    let logical = Size::new(size.x as f64, size.y as f64);
-                    if SurfaceSize::from_logical(
-                        logical,
-                        self.native_scale,
-                        self.renderer.max_texture_side(),
-                    )
-                    .is_some()
-                    {
-                        window.resize(logical);
-                    }
-                }
                 _ => {}
             }
         }
 
-        if let Some(size) = resize_request
-            .and_then(|size| SurfaceSize::new(size, self.renderer.max_texture_side()))
-        {
-            self.surface_size = size;
-        }
         if self.surface_size != old_size {
-            // As in `new()`: convert physical pixels to the logical points
-            // `Window::resize()` expects.
+            // A size from the source, in physical pixels; `Window::resize()`
+            // takes logical points, or the window ends up `native_scale`
+            // times too large on scaled displays.
             window.resize(logical_size_for(self.surface_size, self.native_scale));
         }
 
