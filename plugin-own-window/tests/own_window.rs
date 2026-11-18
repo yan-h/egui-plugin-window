@@ -230,7 +230,7 @@ mod macos {
     /// (b) A dock asked for from a frame, then a close click in the same
     /// turn: the click is queued behind the dock, which leaves its window
     /// gone, and the docked editor stays open. A click alone tells the host
-    /// once, however often it is repeated.
+    /// once, however often it is repeated, and no dock is made after it.
     fn close_click(mtm: MainThreadMarker) {
         let f = fixture(mtm, true);
         assert!(f.own.is_out(), "opened out of the host's window at once");
@@ -261,7 +261,9 @@ mod macos {
         assert!(f.own.is_out(), "docked after the host was told");
         assert!(matches!(f.moves.borrow().last(), Some(Move::Out(_))));
         close(f);
-        println!("own window: a click tells the host once, and a dock ahead of it drops it");
+        println!(
+            "own window: a click tells the host once, and a dock ahead of it drops it, not one after"
+        );
     }
 
     define_class!(
@@ -436,6 +438,7 @@ mod macos {
         f.own.take_size(limits);
         assert_eq!(f.own.resize((1000, 100)), Some((800, 150)));
         assert_eq!(content(&own_window), NSSize::new(800.0, 150.0));
+        assert_eq!(f.own.take_size(limits), None);
         close(f);
         println!("own window: a resize keeps the top-left corner, within the limits");
     }
