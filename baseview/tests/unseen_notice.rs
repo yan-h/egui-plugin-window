@@ -194,16 +194,20 @@ mod macos {
             // A notification lost: the next link callback finds the loss.
             baseview::testing::set_window_shows(Some(true));
             assert!(fire(), "seen again");
+            assert_eq!(occluded(), Some(false), "a gain the link found was not told the handler");
             baseview::testing::set_window_shows(Some(false));
             assert!(!fire(), "occluded, with no notification");
             assert_eq!(told(), 4, "the link callback missed a loss no notification reported");
+            assert_eq!(occluded(), Some(true), "a loss the link found was not told the handler");
 
             baseview::testing::set_window_shows(Some(true));
             assert!(fire(), "seen again");
             view.removeFromSuperview();
             assert_eq!(told(), 5, "the view taken out of its window");
+            assert_eq!(occluded(), Some(true), "a view out of its window was not told the handler");
             host.addSubview(&view);
             assert!(fire(), "seen once back in a window");
+            assert_eq!(occluded(), Some(false), "a view back in a window was not told the handler");
             assert_eq!(told(), 5, "a move back is not told");
 
             shared.hide_in_frame.store(true, Ordering::Relaxed);
