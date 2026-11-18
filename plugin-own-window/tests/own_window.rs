@@ -401,43 +401,87 @@ mod macos {
         println!("own window: later limits replace earlier ones");
     }
 
-    /// (h) Reopened over a remembered frame the limits have since outgrown,
-    /// with a view of another size: the window opens within the limits, as
-    /// large as the minimum, and the shell is told that size at the move and
-    /// the view takes it at the next frame.
+    /// (h) Reopened over a remembered frame of another size: the window
+    /// opens where it was, at the editor's size, which the shell is told at
+    /// the move, and the next frame has nothing to report. With limits the
+    /// editor's size is outside, at the size within them, which the view
+    /// takes at the next frame.
     fn reopen_remembered(mtm: MainThreadMarker) {
-        let f = fixture(mtm, true);
-        assert_eq!(f.own.resize((500, 320)), Some((500, 320)));
-        close(f);
+        // Each open in a pool of its own, so its window is gone, and the
+        // autosave name free, before the next: a window still holding the
+        // name keeps another from saving under it.
+        let remembered = autoreleasepool(|_| {
+            let f = fixture(mtm, true);
+            let own_window = f.view.window().unwrap();
+            assert_eq!(f.own.resize((500, 320)), Some((500, 320)));
+            // Moved, so the remembered corner is not where a first open puts it.
+            own_window.setFrameTopLeftPoint(NSPoint::new(160.0, 600.0));
+            let remembered = top_left(&own_window);
+            close(f);
+            remembered
+        });
+        // A turn after the pool, for AppKit to let the closed window go:
+        // without it, about one run in four reopened without the remembered
+        // frame (measured), a closed window still alive being the likely
+        // cause.
         turn();
 
-        let limits = Limits {
-            min: (600, 400),
-            max: (2000, 2000),
-        };
-        let f = opened(mtm, true, (350.0, 250.0), limits);
-        let own_window = f.view.window().unwrap();
-        assert_eq!(own_window.contentMinSize(), NSSize::new(600.0, 400.0));
-        assert_eq!(content(&own_window), NSSize::new(600.0, 400.0));
-        assert_eq!(*f.moves.borrow(), [Move::Out((600, 400))]);
-        assert_eq!(f.own.take_size(limits), Some(OwnSize::Resized((600, 400))));
-        assert_eq!(f.own.take_size(limits), None);
-        close(f);
-        println!("own window: a remembered frame reopens within the limits");
+        autoreleasepool(|_| {
+            let f = opened(mtm, true, (350.0, 250.0), LIMITS);
+            let own_window = f.view.window().unwrap();
+            assert_eq!(top_left(&own_window), remembered, "not where it was");
+            assert_eq!(
+                content(&own_window),
+                NSSize::new(350.0, 250.0),
+                "not the editor's size"
+            );
+            assert_eq!(*f.moves.borrow(), [Move::Out((350, 250))]);
+            assert_eq!(f.own.take_size(LIMITS), None);
+            close(f);
+        });
+        turn();
+
+        autoreleasepool(|_| {
+            let limits = Limits {
+                min: (600, 400),
+                max: (2000, 2000),
+            };
+            let f = opened(mtm, true, (350.0, 250.0), limits);
+            let own_window = f.view.window().unwrap();
+            assert_eq!(top_left(&own_window), remembered, "not where it was");
+            assert_eq!(own_window.contentMinSize(), NSSize::new(600.0, 400.0));
+            assert_eq!(
+                content(&own_window),
+                NSSize::new(600.0, 400.0),
+                "outside the limits"
+            );
+            assert_eq!(*f.moves.borrow(), [Move::Out((600, 400))]);
+            assert_eq!(f.own.take_size(limits), Some(OwnSize::Resized((600, 400))));
+            assert_eq!(f.own.take_size(limits), None);
+            close(f);
+        });
+        println!("own window: it reopens where it was, at the editor's size");
     }
 
     pub fn run() {
         autoreleasepool(|_| {
             let mtm = MainThreadMarker::new().expect("native test runs on the main thread");
             let _app = NSApplication::sharedApplication(mtm);
-            undock_then_dock(mtm);
-            close_click(mtm);
-            click_dock_undock(mtm);
-            stale_click(mtm);
-            drop_with_calls_pending(mtm);
-            resize_keeps_top_left(mtm);
-            limits_follow(mtm);
-            reopen_remembered(mtm);
+            // Each in a pool of its own, so its windows, and their hold on
+            // the autosave name, are gone before the next.
+            let tests: [fn(MainThreadMarker); 8] = [
+                undock_then_dock,
+                close_click,
+                click_dock_undock,
+                stale_click,
+                drop_with_calls_pending,
+                resize_keeps_top_left,
+                limits_follow,
+                reopen_remembered,
+            ];
+            for test in tests {
+                autoreleasepool(|_| test(mtm));
+            }
         });
         // Once every window is gone: a window saves its frame again as it
         // goes, so forgetting earlier would leave one behind.

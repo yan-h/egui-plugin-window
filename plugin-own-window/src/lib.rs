@@ -28,6 +28,11 @@
 //! did, and drops to the normal level while another app is, which is where
 //! Bitwig's would have vanished.
 //!
+//! It opens where it was last, remembered by AppKit under the name the
+//! plug-in gives it, at the editor's size within the shell's limits: the
+//! project keeps the editor's size, and the window only its place. The first
+//! time, it opens where the host's window is.
+//!
 //! A key the editor leaves unclaimed goes to the host's view from either
 //! window: baseview sends it to the view it was opened in, held weakly,
 //! rather than up the responder chain, which in this window ends at the
@@ -85,6 +90,16 @@ pub struct Limits {
     pub max: (u32, u32),
 }
 
+impl Limits {
+    /// `size` within the limits, on each axis.
+    pub fn clamp(self, (width, height): (u32, u32)) -> (u32, u32) {
+        (
+            width.clamp(self.min.0, self.max.0),
+            height.clamp(self.min.1, self.max.1),
+        )
+    }
+}
+
 /// What the size source owes the view this frame, from
 /// [`OwnWindow::take_size`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +107,7 @@ pub enum OwnSize {
     /// The view is in its own window, which is this size: the editor takes
     /// it. Reported when the window's size differs from the one the editor
     /// last had from it: after the player resizes it, or after a move out
-    /// into a remembered frame of another size. A size the editor asked for
+    /// whose limits the editor's size was outside. A size the editor asked for
     /// through [`OwnWindow::resize`] is returned there, not reported again.
     Resized((u32, u32)),
     /// The view is back in the host's window, which the plug-in asks for the

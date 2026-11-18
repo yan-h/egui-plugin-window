@@ -442,8 +442,7 @@ otonal's was ported from harmonigraph's at harmonigraph `b154fe82`; which side e
 - **From harmonigraph's**: one object per open editor, owned by the editor handle, with weak references elsewhere and its cleanup on drop;
 the main-thread rule held by `dispatch2::MainThreadBound` rather than a `Mutex` and `unsafe impl Send`;
 the latch that tells the host of a close click once;
-no close button where there is no host to tell;
-the minimum set on the window before its remembered frame is restored, so a remembered frame smaller than it is widened.
+no close button where there is no host to tell.
 - **From otonal's**: the minimum and maximum size given by the shell (at `open`, then at every frame through `take_size`'s `Limits`), where harmonigraph's had a fixed minimum;
 `is_out`, for a host `set_size` arriving while the view is out;
 a move out before a pending dock was seen owes the host no resize;
@@ -462,7 +461,8 @@ so for harmonigraph, whose copy left it to AppKit, this is very likely no visibl
   Harmonigraph's copy cancelled a pending close at a dock; otonal's did neither, and left a withdrawn `apply:` queued in both.
   A click queued before a dock is honoured; one queued behind a pending dock is dropped.
   - `resize` returns the content size AppKit applied, for the editor to take, rather than a success flag.
-  - No size is set between `setFrameUsingName:` and `setFrameAutosaveName:`: naming the frame restores a remembered one again (measured), so both copies' `setContentSize:` there was undone,
-  and their own window has reopened as large as it last was, within the limits, the editor taking that size at its next frame. That is kept, and the comment saying otherwise is gone.
+  - The window reopens where it was, at the editor's size within the limits, keeping the remembered top-left corner (decided by Yan, tracked in yan-h/egui-plugin-window#12).
+  Both copies meant to, but set the size between `setFrameUsingName:` and `setFrameAutosaveName:`, and naming the frame restores the remembered one again (measured),
+  so their window reopened as large as the last own window was, and the editor took that size. The size is now set after the naming.
   - It takes the two views as raw `NSView` pointers rather than either shell's window-handle types, so it depends on neither shell nor on `raw-window-handle`.
 - **Tests**: `tests/own_window.rs` (the moves and their notices, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, a reopen over a remembered frame) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).

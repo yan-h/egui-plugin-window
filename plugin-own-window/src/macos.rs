@@ -57,9 +57,9 @@ struct State {
     closed: Option<Rc<dyn Fn() -> bool>>,
     /// Whom each move is told, before the view moves.
     moving: Option<Rc<dyn Fn(Move)>>,
-    /// The sizes the shell allows, as last given: the window takes them
-    /// before its remembered frame is restored, which they bound, and the
-    /// window does not exist when the size source gives them.
+    /// The sizes the shell allows, as last given: a window opened between
+    /// two frames takes them, and opens at the editor's size within them,
+    /// and the window does not exist when the size source gives them.
     limits: Option<Limits>,
     /// The editor's own window, from just before the view moves into it to
     /// just before it moves out.
@@ -109,6 +109,22 @@ fn as_object(window: &NSWindow) -> &AnyObject {
 fn set_limits(window: &NSWindow, limits: Limits) {
     window.setContentMinSize(ns_size(limits.min));
     window.setContentMaxSize(ns_size(limits.max));
+}
+
+/// Content at `size`, keeping the window's top-left corner, as a host's
+/// window grows, so the title bar stays where it was; returns the content
+/// size applied. The frame is computed whole: AppKit's `setContentSize:`
+/// kept the top-left too where measured (macOS 26 and 27), but nothing
+/// documents which corner it keeps.
+fn set_content_size(window: &NSWindow, size: NSSize) -> (u32, u32) {
+    let frame = window.frame();
+    let mut resized = window.frameRectForContentRect(NSRect::new(NSPoint::ZERO, size));
+    resized.origin = NSPoint::new(
+        frame.origin.x,
+        frame.origin.y + frame.size.height - resized.size.height,
+    );
+    window.setFrame_display(resized, true);
+    logical(window.contentRectForFrameRect(window.frame()).size)
 }
 
 fn top_left(window: &NSWindow) -> NSPoint {
@@ -393,18 +409,7 @@ impl OwnWindow {
     /// window.
     pub fn resize(&self, size: (u32, u32)) -> Option<(u32, u32)> {
         let window = self.state().borrow().window.clone()?;
-        // The frame computed whole, keeping the top-left corner, as a host's
-        // window grows, so the title bar stays where it was. AppKit's
-        // `setContentSize:` kept it too where measured (macOS 26 and 27), but
-        // nothing documents which corner it keeps.
-        let frame = window.frame();
-        let mut resized = window.frameRectForContentRect(NSRect::new(NSPoint::ZERO, ns_size(size)));
-        resized.origin = NSPoint::new(
-            frame.origin.x,
-            frame.origin.y + frame.size.height - resized.size.height,
-        );
-        window.setFrame_display(resized, true);
-        let applied = logical(window.contentRectForFrameRect(window.frame()).size);
+        let applied = set_content_size(&window, ns_size(size));
         self.state().borrow_mut().size = applied;
         Some(applied)
     }
@@ -487,16 +492,7 @@ impl OwnWindow {
             FLOATING
         });
 
-        // Before the remembered frame is restored, which they bound: one
-        // restored first keeps a size outside them.
-        if let Some(limits) = limits {
-            set_limits(&own, limits);
-        }
-        // Where it was last time, and as large, within the limits: the
-        // editor takes the window's size at its next frame
-        // ([`OwnSize::Resized`]). The first time, at the editor's size, where
-        // the host's window is. Naming the frame restores a remembered one
-        // too (measured), so a size set between the two would be undone.
+        // Where it was last time; the first time, where the host's window is.
         if !own.setFrameUsingName(name) {
             match host.window() {
                 Some(host_window) => own.setFrameTopLeftPoint(top_left(&host_window)),
@@ -506,6 +502,21 @@ impl OwnWindow {
         // Refused for a second open editor with the same name in the same
         // process, which then just goes unremembered.
         own.setFrameAutosaveName(name);
+        // At the editor's size, within the limits, which also bound the
+        // player's resizing from here, keeping the remembered top-left: the
+        // frame remembers where the window was, and the project how large
+        // its editor is (decided by Yan, egui-plugin-window#12). Set after
+        // the naming, which restores the remembered frame again (measured)
+        // and would undo a size set before it. Nothing keeps the larger
+        // window on screen beyond what AppKit does as it orders it in.
+        let wanted = match limits {
+            Some(limits) => {
+                set_limits(&own, limits);
+                limits.clamp(logical(content))
+            }
+            None => logical(content),
+        };
+        let size = set_content_size(&own, ns_size(wanted));
 
         let Some(own_content) = own.contentView() else {
             return;
@@ -514,14 +525,14 @@ impl OwnWindow {
         // is this window's, which a save must find at once rather than at the
         // next frame, since none runs while the editor cannot be seen.
         if let Some(moving) = moving {
-            moving(Move::Out(logical(own_content.frame().size)));
+            moving(Move::Out(size));
         }
         // Out from here, before the view moves: attaching it can draw a frame
         // on the spot, whose size source must find it out, and a host
         // `set_size` arriving from now on is not the editor's. The view's
-        // size is what the editor has; a remembered frame of another size is
-        // reported at the next frame. A dock no frame has seen yet is undone,
-        // and owes the host nothing.
+        // size is what the editor has; one the limits changed is reported at
+        // the next frame. A dock no frame has seen yet is undone, and owes the
+        // host nothing.
         {
             let mut state = self.state().borrow_mut();
             state.window = Some(own.clone());
