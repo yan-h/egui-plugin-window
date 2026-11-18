@@ -184,10 +184,9 @@ fork used by nice-plug).
 The conditions constant on macOS are folded:
 cut, copy and paste take Cmd alone, and the modifier translation and the wheel's flip take their macOS branches.
 Off macOS the clipboard is copypasta's no-op context, since no window opens there.
-- **Patch 1** (2 call sites, `src/window.rs`): after a `Queue::resize()`,
-the window resize triggered by the physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
+- **Patch 1** (1 call site, `src/window.rs` `on_frame`): the window resize that follows a physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
 on scaled displays the window/view ended up `pixels_per_point` times too large (2x-zoomed, bottom-left-anchored content on Retina).
-Convert with `logical_size_for` at both call sites (build path and `on_frame`), at the native scale.
+Convert with `logical_size_for`, at the native scale. The build path's site went with `Queue::resize` (Patch 29).
 - **Patch 2** (1 site, `src/window.rs` `on_frame`): texture deltas (font
 atlas rebuilds after `set_fonts`, new images) are only uploaded inside `render()`, but frames with no repaint due skip `render()` and drop the deltas permanently —
 glyph coordinates then point into a stale atlas (scrambled text).
@@ -415,13 +414,13 @@ It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on 
 Its checking constructors take a physical size, or a logical size at the native scale through baseview's `WindowInfo::from_logical_size`, the arithmetic its `Resized` event reports with;
 a non-finite or non-positive size or scale saturates to zero or `u32::MAX` in that cast, which the check refuses.
 The window holds one and `Renderer::render` takes one, so the renderer has no size check of its own.
-A size from the `SizeSource`, an `InnerSize` command, a `Queue::resize` (recorded in the pass and applied after it, as the frame divisor is) and a `Resized` event go through it;
+A size from the `SizeSource` and a `Resized` event go through it (an `InnerSize` command and a `Queue::resize` did until Patch 29);
 one it refuses is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
 The opening size, which has nothing to fall back to, is clamped into 1 to the limit on each side instead.
 The device limit is read only when a size arrives.
 `SurfaceSize` and `logical_size_for` have their own tests.
 - **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
-The screen rect and `InnerSize` commands use the native scale times `Context::zoom_factor`, pointer positions and pixel wheel deltas (Patch 28) the zoom alone, being logical already, and `render` tessellates at the pass's `pixels_per_point`;
+The screen rect (and `InnerSize` commands, until Patch 29) use the native scale times `Context::zoom_factor`, pointer positions and pixel wheel deltas (Patch 28) the zoom alone, being logical already, and `render` tessellates at the pass's `pixels_per_point`;
 physical sizes, logical host sizes and the viewport's `native_pixels_per_point` stay native.
 `points_per_pixel` is computed from the two rather than stored.
 Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger than its own and missed its pointer.
@@ -439,6 +438,10 @@ Both the key event egui is sent and the shortcut match use it.
 baseview forwards AppKit's `scrollingDeltaX/Y`, which are in points, the pointer's unit; Patch 24 divided them by the backing scale as well, as upstream did,
 so every trackpad scroll moved half as far on a 2x display. winit, behind egui-winit, gives the same delta.
 A line scroll is unchanged.
+- **Patch 29** (`src/window.rs`): one path for the editor's size (#3).
+`Queue::resize` and the `ViewportCommand::InnerSize` arm are gone, so a size reaches the window only through the `SizeSource`, asked before each frame, or a `Resized` event;
+neither plug-in called the one or sent the other, and each was a second size write with its own rule for a size no surface can take.
+The window opens at the size its settings give, clamped to the device's limit.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
