@@ -1378,17 +1378,7 @@ where
                 } => {
                     self.update_modifiers(modifiers);
 
-                    let (unit, delta) = match scroll_delta {
-                        baseview::ScrollDelta::Lines { x, y } => {
-                            (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
-                        }
-
-                        baseview::ScrollDelta::Pixels { x, y } => (
-                            egui::MouseWheelUnit::Point,
-                            egui::vec2(*x, *y)
-                                * points_per_pixel(self.native_scale, self.egui_ctx.zoom_factor()),
-                        ),
-                    };
+                    let (unit, delta) = scroll_in_points(scroll_delta, self.egui_ctx.zoom_factor());
                     let shift = self.egui_input.modifiers.shift;
                     let delta = wheel_delta(delta, shift);
 
@@ -1692,6 +1682,19 @@ fn points_per_pixel(native_scale: f32, zoom: f32) -> f32 {
 /// A cursor position in logical (host) pixels, in egui points under `zoom`.
 fn pointer_in_points(position: &baseview::Point, zoom: f32) -> Pos2 {
     pos2(position.x as f32, position.y as f32) / zoom
+}
+
+/// A wheel or trackpad scroll as egui reads it. A precise delta is in
+/// logical (host) pixels, AppKit's points, as the pointer is, so it divides
+/// by the zoom alone: dividing by the backing scale as well halved every
+/// trackpad scroll on a 2x display. winit, behind egui-winit, gives the same.
+fn scroll_in_points(delta: &baseview::ScrollDelta, zoom: f32) -> (egui::MouseWheelUnit, egui::Vec2) {
+    match *delta {
+        baseview::ScrollDelta::Lines { x, y } => (egui::MouseWheelUnit::Line, egui::vec2(x, y)),
+        baseview::ScrollDelta::Pixels { x, y } => {
+            (egui::MouseWheelUnit::Point, egui::vec2(x, y) / zoom)
+        }
+    }
 }
 
 /// A press or release at the position baseview gives it, in points under the
@@ -2318,6 +2321,24 @@ mod resize_tests {
             let corner = baseview::Point::new(1400.0, 800.0);
             assert_eq!(pointer_in_points(&corner, 1.25), pos2(1120.0, 640.0));
         }
+    }
+
+    /// A precise scroll moves the content as far as the pointer moves over
+    /// the same logical distance, at any backing scale; a line scroll stays
+    /// in lines.
+    #[test]
+    fn a_precise_scroll_moves_as_far_as_the_pointer() {
+        let zoom = 1.25;
+        let pointer = pointer_in_points(&baseview::Point::new(100.0, 40.0), zoom)
+            - pointer_in_points(&baseview::Point::new(0.0, 0.0), zoom);
+        assert_eq!(
+            scroll_in_points(&baseview::ScrollDelta::Pixels { x: 100.0, y: 40.0 }, zoom),
+            (egui::MouseWheelUnit::Point, pointer)
+        );
+        assert_eq!(
+            scroll_in_points(&baseview::ScrollDelta::Lines { x: 1.0, y: 3.0 }, zoom),
+            (egui::MouseWheelUnit::Line, vec2(1.0, 3.0))
+        );
     }
 
     /// A press with no move before it lands where baseview says, under the

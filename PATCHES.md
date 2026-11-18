@@ -418,6 +418,10 @@ The window holds one and `Renderer::render` takes one, so the renderer has no si
 A size from the `SizeSource`, an `InnerSize` command, a `Queue::resize` (recorded in the pass and applied after it, as the frame divisor is) and a `Resized` event go through it;
 one it refuses is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
 The opening size, which has nothing to fall back to, is clamped into 1 to the limit on each side instead.
+- **Patch 24** (`src/window.rs` `scroll_in_points`): a precise scroll divides by egui's zoom alone (#2).
+baseview forwards AppKit's `scrollingDeltaX/Y`, which are in points, the pointer's unit; upstream divided them by the backing scale as well,
+so every trackpad scroll moved half as far on a 2x display. winit, behind egui-winit, gives the same delta.
+A line scroll is unchanged.
 The device limit is read only when a size arrives.
 `SurfaceSize` and `logical_size_for` have their own tests.
 - **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
