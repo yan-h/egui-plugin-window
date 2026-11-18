@@ -91,11 +91,13 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// `size` within the limits, on each axis.
+    /// `size` within the limits, on each axis. Where a maximum is below its
+    /// minimum, the minimum wins, rather than `u32::clamp` panicking on the
+    /// main thread.
     pub fn clamp(self, (width, height): (u32, u32)) -> (u32, u32) {
         (
-            width.clamp(self.min.0, self.max.0),
-            height.clamp(self.min.1, self.max.1),
+            width.clamp(self.min.0, self.max.0.max(self.min.0)),
+            height.clamp(self.min.1, self.max.1.max(self.min.1)),
         )
     }
 }

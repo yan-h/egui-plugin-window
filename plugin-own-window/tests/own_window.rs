@@ -138,6 +138,43 @@ mod macos {
         window.contentView().unwrap().frame().size
     }
 
+    /// Where AppKit restores the remembered frame's top-left corner now, on
+    /// a probe window. Not the corner saved: with several displays AppKit may
+    /// restore a frame onto another display than the one it was on, by the
+    /// desktop's state at that moment (seen on a Mac with three).
+    fn restored(mtm: MainThreadMarker) -> (f64, f64) {
+        // SAFETY: a plain window, created and owned on the main thread.
+        let probe = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, NSSize::new(100.0, 100.0)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Resizable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { probe.setReleasedWhenClosed(false) };
+        assert!(
+            probe.setFrameUsingName(&NSString::from_str(&name())),
+            "nothing remembered"
+        );
+        let corner = top_left(&probe);
+        probe.close();
+        corner
+    }
+
+    /// Forgets the frame when dropped, on a failing run's unwind as well.
+    struct Forget;
+
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            autoreleasepool(|_| {
+                turn();
+                forget();
+            });
+        }
+    }
+
     fn close(fixture: Fixture) {
         fixture.own.close();
         fixture.host_window.close();
@@ -413,25 +450,19 @@ mod macos {
     /// takes at the next frame.
     fn reopen_remembered(mtm: MainThreadMarker) {
         // Each open in a pool of its own, so its window is gone, and the
-        // autosave name free, before the next: a window still holding the
-        // name keeps another from saving under it.
-        let remembered = autoreleasepool(|_| {
+        // autosave name free, before the next.
+        autoreleasepool(|_| {
             let f = fixture(mtm, true);
             let own_window = f.view.window().unwrap();
             assert_eq!(f.own.resize((500, 320)), Some((500, 320)));
             // Moved, so the remembered corner is not where a first open puts it.
             own_window.setFrameTopLeftPoint(NSPoint::new(160.0, 600.0));
-            let remembered = top_left(&own_window);
             close(f);
-            remembered
         });
-        // A turn after the pool, for AppKit to let the closed window go:
-        // without it, about one run in four reopened without the remembered
-        // frame (measured), a closed window still alive being the likely
-        // cause.
         turn();
 
         autoreleasepool(|_| {
+            let remembered = restored(mtm);
             let f = opened(mtm, true, (350.0, 250.0), LIMITS);
             let own_window = f.view.window().unwrap();
             assert_eq!(top_left(&own_window), remembered, "not where it was");
@@ -451,6 +482,7 @@ mod macos {
                 min: (600, 400),
                 max: (2000, 2000),
             };
+            let remembered = restored(mtm);
             let f = opened(mtm, true, (350.0, 250.0), limits);
             let own_window = f.view.window().unwrap();
             assert_eq!(top_left(&own_window), remembered, "not where it was");
@@ -469,6 +501,9 @@ mod macos {
     }
 
     pub fn run() {
+        // Dropped last, once every window is gone: a window saves its frame
+        // again as it goes, so forgetting earlier would leave one behind.
+        let _forget = Forget;
         autoreleasepool(|_| {
             let mtm = MainThreadMarker::new().expect("native test runs on the main thread");
             let _app = NSApplication::sharedApplication(mtm);
@@ -487,12 +522,6 @@ mod macos {
             for test in tests {
                 autoreleasepool(|_| test(mtm));
             }
-        });
-        // Once every window is gone: a window saves its frame again as it
-        // goes, so forgetting earlier would leave one behind.
-        autoreleasepool(|_| {
-            turn();
-            forget();
         });
     }
 }

@@ -131,6 +131,9 @@ mod macos {
     }
 
     pub fn run() {
+        // Dropped last, once every window is gone, which saves its frame
+        // again as it goes.
+        let _forget = Forget;
         autoreleasepool(|_| {
             let mtm = MainThreadMarker::new().expect("native test runs on the main thread");
             let _app = NSApplication::sharedApplication(mtm);
@@ -198,12 +201,19 @@ mod macos {
             host_window.close();
             println!("host keys through the own window: own window and redocked passed");
         });
-        // Once every window is gone, which saves its frame again as it goes.
-        autoreleasepool(|_| {
-            turn();
-            let key = NSString::from_str(&format!("NSWindow Frame {}", name()));
-            NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
-        });
+    }
+
+    /// Forgets the frame when dropped, on a failing run's unwind as well.
+    struct Forget;
+
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            autoreleasepool(|_| {
+                turn();
+                let key = NSString::from_str(&format!("NSWindow Frame {}", name()));
+                NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
+            });
+        }
     }
 }
 
