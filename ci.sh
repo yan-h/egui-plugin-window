@@ -9,9 +9,10 @@ cd "$(dirname "$0")"
 egui_features=(--no-default-features --features wgpu,tracing)
 
 if [[ "$(uname)" == "Darwin" ]]; then
-    cargo test --locked -p baseview
+    # `testing` lets the native unseen-notice test read a window as visible.
+    cargo test --locked -p baseview --features testing
     cargo test --locked -p egui-baseview "${egui_features[@]}"
 else
-    cargo check --locked --all-targets -p baseview
+    cargo check --locked --all-targets -p baseview --features testing
     cargo check --locked --all-targets -p egui-baseview "${egui_features[@]}"
 fi

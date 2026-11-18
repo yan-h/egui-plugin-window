@@ -40,6 +40,9 @@ all-features = true
 
 [features]
 default = []
+# Native tests only: lets a test set what a window's occlusion state reads as
+# (`baseview::testing`). No plug-in enables it.
+testing = []
 
 [lib]
 name = "baseview"
@@ -59,6 +62,12 @@ harness = false
 name = "unseen_frames"
 path = "tests/unseen_frames.rs"
 harness = false
+
+[[test]]
+name = "unseen_notice"
+path = "tests/unseen_notice.rs"
+harness = false
+required-features = ["testing"]
 
 [dependencies.keyboard-types]
 version = "0.6.1"

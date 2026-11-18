@@ -114,6 +114,10 @@ pub struct EguiWindowSettings {
 
     /// How another thread asks this window for a pass. See [`PassRequest`].
     pub pass_request: PassRequest,
+
+    /// Whom the view tells that it stopped being seen, if anyone: handed to
+    /// baseview, which owns the test. See [`baseview::UnseenNotice`].
+    pub unseen_notice: Option<baseview::UnseenNotice>,
 }
 
 impl EguiWindowSettings {
@@ -150,6 +154,11 @@ impl EguiWindowSettings {
         self.pass_request = request;
         self
     }
+
+    pub fn with_unseen_notice(mut self, notice: baseview::UnseenNotice) -> Self {
+        self.unseen_notice = Some(notice);
+        self
+    }
 }
 
 impl Default for EguiWindowSettings {
@@ -164,6 +173,7 @@ impl Default for EguiWindowSettings {
             graphics: GraphicsConfig::default(),
             size_source: None,
             pass_request: PassRequest::default(),
+            unseen_notice: None,
         }
     }
 }
@@ -636,6 +646,7 @@ where
                 title: settings.title.clone(),
                 size: settings.logical_size,
                 scale: settings.scale_policy,
+                unseen_notice: settings.unseen_notice.clone(),
                 ..Default::default()
             },
             move |window: &mut baseview::Window<'_>| -> EguiWindow<State, U> {
@@ -663,6 +674,7 @@ where
                 title: settings.title.clone(),
                 size: settings.logical_size,
                 scale: settings.scale_policy,
+                unseen_notice: settings.unseen_notice.clone(),
                 ..Default::default()
             },
             move |window: &mut baseview::Window<'_>| -> EguiWindow<State, U> {

@@ -145,6 +145,20 @@ A release that never comes is repaired by Patch 6 within two settles, and the ex
 `tests/press_location.rs` (no harness, as `host_keys.rs`) sends a `mouseUp:` no press owes, then a press and a release outside the view with no move before either, and checks the first is not reported and the other two carry their points;
 a unit test beside the mask tests checks `exit_waits`.
 macOS only.
+- **Patch 11** (`src/window_open_options.rs`, `src/platform/macos/view.rs`, `src/wrappers/appkit/view.rs` + `view/implementation.rs`, `src/lib.rs`, `Cargo.toml`, `tests/unseen_notice.rs`; for harmonigraph): tell the app when its view stops being seen.
+Since patch 9 no frame runs for a view nobody can see, so work an app finishes from its frames has no chance to finish as the view goes unseen:
+harmonigraph ends an open host parameter gesture from a pass, and one begun just before its editor was hidden stayed touched in Bitwig until the editor was seen again.
+`WindowOpenOptions::with_unseen_notice` takes an `UnseenNotice`, an `Fn()`.
+"Seen" is patch 9's frame test, `is_visible`, with one owner: `check_seen` asks it, keeps the answer in `seen`, and tells the app when it turns from seen to not seen.
+It is asked at every event that can change it: the occlusion notification, `viewDidHide` and `viewDidUnhide` (new `ViewImpl` methods, sent for an ancestor too), a move to another window or to none, and the frame gate on every link callback, which repairs a lost notification while the link fires.
+Never at open (`seen` starts false and the open samples it), never on a reveal, never twice for one loss, and not once the window is closed, whose own removal from its window would otherwise read as one.
+It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame`, `trigger_event` or `trigger_deferrable_event` lets go, so the app may call its host, whatever the host does to this window in return.
+It can arrive inside the app's own calls that hide the view or move it between windows: a view moved into a window not yet on screen reads as not seen, so a plug-in moving its editor into a window of its own is told at the move.
+A notification lost while no frame runs (a minimized or ordered-out window, whose link stops) is not caught until an event asks again.
+No notice set, nothing changes; otonal sets none.
+The `testing` feature (native tests only; no plug-in enables it) lets a test set what a window's occlusion state reads as (`baseview::testing::set_window_shows`), since a window reads as visible only once the window server says so, which a test process may never see.
+`tests/unseen_notice.rs` (no harness, as `host_keys.rs`), which `ci.sh` runs with that feature, checks one call each for the view hidden, an ancestor hidden, the window occluded by notification, the window occluded with the notification lost and the next link callback finding it, and the view taken out of its window;
+none at open, on a reveal, on a move back, for a repeat, or at close; and that a loss found inside a frame is told after it.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -153,7 +167,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see with its unseen notice, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -415,6 +429,7 @@ egui's input state reads that field, and ends a pane drag on focus loss by it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
 AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
+- **Patch 27** (`src/window.rs`; for harmonigraph): `EguiWindowSettings::with_unseen_notice` hands an app's `UnseenNotice` to baseview (its patch 11), which owns the test and the call.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

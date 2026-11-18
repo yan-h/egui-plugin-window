@@ -7,7 +7,7 @@ use crate::wrappers::appkit::*;
 use crate::MouseEvent::{ButtonPressed, ButtonReleased};
 use crate::{
     DropData, DropEffect, Event, EventStatus, MouseButton, MouseEvent, Point, ScrollDelta, Size,
-    WindowEvent, WindowHandler, WindowInfo, WindowOpenOptions,
+    UnseenNotice, WindowEvent, WindowHandler, WindowInfo, WindowOpenOptions,
 };
 use objc2::__framework_prelude::Retained;
 use objc2::rc::Weak;
@@ -87,6 +87,14 @@ pub(crate) struct BaseviewView {
     window_visible: Cell<Option<bool>>,
     occlusion_ready: Cell<bool>,
 
+    /// Whom to tell that the view stopped being seen. See `UnseenNotice`.
+    unseen_notice: Option<UnseenNotice>,
+    /// `is_visible`'s last answer, as `check_seen` last asked it. False until
+    /// the first ask, so the view's opening tells nothing.
+    seen: Cell<bool>,
+    /// A loss found while the handler was borrowed, told once it is not.
+    unseen_owed: Cell<bool>,
+
     keyboard_state: KeyboardState,
 
     parenting: ViewParentingType,
@@ -101,6 +109,7 @@ impl BaseviewView {
             NSRect::new(NSPoint::ZERO, NSSize::new(options.size.width, options.size.height));
 
         let state = Rc::new(WindowSharedState::new(&options));
+        let unseen_notice = options.unseen_notice.clone();
 
         let inner = BaseviewView {
             state: state.clone(),
@@ -119,6 +128,9 @@ impl BaseviewView {
             occlusion_observer: None.into(),
             window_visible: None.into(),
             occlusion_ready: false.into(),
+            unseen_notice,
+            seen: false.into(),
+            unseen_owed: false.into(),
             parenting,
         };
 
@@ -178,6 +190,8 @@ impl BaseviewView {
             if let Some(window) = view.view.window() {
                 Self::report_window_occlusion(view, &window, false);
             }
+            // The first answer, which tells nothing: `seen` was false.
+            Self::check_seen(view);
         });
 
         (view, state)
@@ -226,13 +240,17 @@ impl BaseviewView {
     /// Trigger the event immediately and return the event status.
     /// Will panic if `window_handler` is already borrowed (see `trigger_deferrable_event`).
     fn trigger_event(this: ViewRef<Self>, event: Event) -> EventStatus {
-        let mut handler = this.window_handler.borrow_mut();
-        let Some(handler) = handler.as_mut() else {
-            return EventStatus::Ignored;
-        };
+        let status = {
+            let mut handler = this.window_handler.borrow_mut();
+            let Some(handler) = handler.as_mut() else {
+                return EventStatus::Ignored;
+            };
 
-        let status = handler.on_event(&mut this.into(), event);
-        Self::send_deferred_events(this, handler.as_mut());
+            let status = handler.on_event(&mut this.into(), event);
+            Self::send_deferred_events(this, handler.as_mut());
+            status
+        };
+        Self::pay_unseen(this);
         status
     }
 
@@ -249,15 +267,51 @@ impl BaseviewView {
     /// otherwise add the event to a queue that will be cleared once `window_handler`'s mutable borrow ends.
     /// As this method might result in the event triggering asynchronously, it can't reliably return the event status.
     fn trigger_deferrable_event(this: ViewRef<Self>, event: Event) {
-        let Ok(mut handler) = this.window_handler.try_borrow_mut() else {
-            this.deferred_events.borrow_mut().push_back(event);
+        {
+            let Ok(mut handler) = this.window_handler.try_borrow_mut() else {
+                this.deferred_events.borrow_mut().push_back(event);
+                return;
+            };
+
+            let Some(handler) = handler.as_mut() else { return };
+
+            handler.on_event(&mut this.into(), event);
+            Self::send_deferred_events(this, handler.as_mut());
+        }
+        Self::pay_unseen(this);
+    }
+
+    /// Ask `is_visible` again and keep the answer, and tell the app if the
+    /// view has just stopped being seen (`UnseenNotice`). Returns the answer.
+    ///
+    /// Called at each event that can change it: the window's occlusion
+    /// notification, `viewDidHide` and `viewDidUnhide`, a move to another
+    /// window or to none, and the frame gate, which asks on every link
+    /// callback and so repairs a lost notification while the link fires.
+    fn check_seen(this: ViewRef<Self>) -> bool {
+        let seen = Self::is_visible(this);
+        // Not after the window is closed: its own removal from the window is
+        // the app's doing, and nothing is left to tell.
+        if this.seen.replace(seen) && !seen && !this.state.closed.get() {
+            this.unseen_owed.set(true);
+            Self::pay_unseen(this);
+        }
+        seen
+    }
+
+    /// Tell a loss `check_seen` found, unless the window handler is borrowed
+    /// (a frame or an event is running, and the loss was found inside it):
+    /// then whoever holds the borrow pays it as the borrow ends, so the app
+    /// is never called inside it and may call its host, whatever the host
+    /// does to this window in return.
+    fn pay_unseen(this: ViewRef<Self>) {
+        if !this.unseen_owed.get() || this.window_handler.try_borrow_mut().is_err() {
             return;
-        };
-
-        let Some(handler) = handler.as_mut() else { return };
-
-        handler.on_event(&mut this.into(), event);
-        Self::send_deferred_events(this, handler.as_mut());
+        }
+        this.unseen_owed.set(false);
+        if let Some(notice) = &this.unseen_notice {
+            notice.tell();
+        }
     }
 
     /// Draw on every `divisor`th refresh from here on; 0 and 1 are every one.
@@ -297,7 +351,7 @@ impl BaseviewView {
         // settle. Whatever is owed then is paid once it shows, before anything
         // is drawn from it: a withheld exit on the first frame, a stuck button
         // on the second, since a release needs two settles to be confirmed.
-        if !Self::is_visible(this) {
+        if !Self::check_seen(this) {
             return;
         }
 
@@ -309,11 +363,14 @@ impl BaseviewView {
         Self::settle_stuck_buttons(this);
         Self::settle_pointer_exit(this);
 
-        let Ok(mut handler) = this.window_handler.try_borrow_mut() else { return };
-        let Some(handler) = handler.as_mut() else { return };
+        {
+            let Ok(mut handler) = this.window_handler.try_borrow_mut() else { return };
+            let Some(handler) = handler.as_mut() else { return };
 
-        handler.on_frame(&mut this.into());
-        Self::send_deferred_events(this, handler.as_mut());
+            handler.on_frame(&mut this.into());
+            Self::send_deferred_events(this, handler.as_mut());
+        }
+        Self::pay_unseen(this);
     }
 
     /// Whether any of the view can be on screen. AppKit's occlusion state is
@@ -497,6 +554,7 @@ impl BaseviewView {
         }
 
         Self::report_window_occlusion(this, &window, true);
+        Self::check_seen(this);
     }
 
     fn report_window_occlusion(this: ViewRef<Self>, window: &NSWindow, paint_visible: bool) {
@@ -557,6 +615,10 @@ impl BaseviewView {
 /// Whether any of `window` can be on screen, by its occlusion state: the
 /// window half of `is_visible`, and what an occlusion notification reports.
 fn window_shows(window: &NSWindow) -> bool {
+    #[cfg(feature = "testing")]
+    if let Some(shows) = crate::testing::WINDOW_SHOWS.with(std::cell::Cell::get) {
+        return shows;
+    }
     window.occlusionState().contains(NSWindowOcclusionState::Visible)
 }
 
@@ -696,6 +758,25 @@ impl ViewImpl for BaseviewView {
         if let Some(window) = this.view.window() {
             Self::report_window_occlusion(this, &window, true);
         }
+        // A view taken out of its window, or moved into one not on screen,
+        // has stopped being seen.
+        Self::check_seen(this);
+    }
+
+    fn view_did_hide(this: ViewRef<Self>) {
+        unsafe {
+            let superclass = msg_send![this.view, superclass];
+            let () = msg_send![super(this.view, superclass), viewDidHide];
+        }
+        Self::check_seen(this);
+    }
+
+    fn view_did_unhide(this: ViewRef<Self>) {
+        unsafe {
+            let superclass = msg_send![this.view, superclass];
+            let () = msg_send![super(this.view, superclass), viewDidUnhide];
+        }
+        Self::check_seen(this);
     }
 
     fn update_tracking_areas(this: ViewRef<Self>) {
