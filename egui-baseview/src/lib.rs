@@ -8,6 +8,4 @@ pub use baseview;
 pub use renderer::{GraphicsConfig, WgpuSetup};
 #[cfg(feature = "wgpu")]
 pub use renderer::SharedGpuContext;
-pub use window::{
-    EguiWindow, EguiWindowSettings, PassRequest, Queue, SizeSource, VisibilityNotice,
-};
+pub use window::{EguiWindow, EguiWindowSettings, PassRequest, Queue, SizeSource};

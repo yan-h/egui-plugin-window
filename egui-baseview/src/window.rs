@@ -93,65 +93,6 @@ impl PassRequest {
     }
 }
 
-/// How the app is told that its view has stopped being seen, or is seen
-/// again: called with `seen`.
-///
-/// It follows baseview's occlusion notice (`WindowEvent::Occluded`), which
-/// reads the window's occlusion state, so it is called:
-///
-/// - once as the window opens, with the state it opens in: inside
-///   `open_parented`, after the build closure has run;
-/// - when that window becomes covered, minimized, ordered out or moved to
-///   another Space (`false`), and when it is seen again (`true`);
-/// - when the view moves to another window that reads differently.
-///
-/// It is not called for a view hidden inside a visible window, which raises
-/// no occlusion notice, though no frame runs for it either; nor twice in a
-/// row with the same answer. On a reveal it is called BEFORE the reveal's
-/// frame, the one painted from the notice, so what it changes is drawn there.
-/// No frame is running when it is called, except where a notice arrives
-/// while one is, when it is called just after that frame.
-///
-/// Called on the main thread from the window's event handler, so baseview's
-/// handler is borrowed for the call: an event the callback causes on this
-/// window (a resize, a focus change) is queued and handled after it returns,
-/// and closing the window is safe. The callback must not run a nested event
-/// loop, whose mouse and key events would find the handler borrowed. It may
-/// take the app's own locks and call its host.
-#[derive(Clone)]
-pub struct VisibilityNotice(Arc<dyn Fn(bool) + Send + Sync>);
-
-impl VisibilityNotice {
-    pub fn new(notice: impl Fn(bool) + Send + Sync + 'static) -> Self {
-        VisibilityNotice(Arc::new(notice))
-    }
-}
-
-impl std::fmt::Debug for VisibilityNotice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("VisibilityNotice")
-    }
-}
-
-/// The window's side of a [`VisibilityNotice`]: what it last told, so a
-/// reattachment that reads the same, or a repeated notice, tells nothing.
-#[derive(Default)]
-struct Visibility {
-    notice: Option<VisibilityNotice>,
-    seen: Option<bool>,
-}
-
-impl Visibility {
-    /// The notice to call for an occlusion event, and with what, if this
-    /// changes what it was last told. Returned rather than called here, so
-    /// the call holds no borrow of this state.
-    fn occluded(&mut self, occluded: bool) -> Option<(VisibilityNotice, bool)> {
-        let seen = !occluded;
-        let notice = self.notice.clone()?;
-        (self.seen.replace(seen) != Some(seen)).then_some((notice, seen))
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct EguiWindowSettings {
     pub title: String,
@@ -173,10 +114,6 @@ pub struct EguiWindowSettings {
 
     /// How another thread asks this window for a pass. See [`PassRequest`].
     pub pass_request: PassRequest,
-
-    /// Whom the window tells that its view stopped being seen, or is seen
-    /// again, if anyone. See [`VisibilityNotice`].
-    pub visibility_notice: Option<VisibilityNotice>,
 }
 
 impl EguiWindowSettings {
@@ -213,11 +150,6 @@ impl EguiWindowSettings {
         self.pass_request = request;
         self
     }
-
-    pub fn with_visibility_notice(mut self, notice: VisibilityNotice) -> Self {
-        self.visibility_notice = Some(notice);
-        self
-    }
 }
 
 impl Default for EguiWindowSettings {
@@ -232,7 +164,6 @@ impl Default for EguiWindowSettings {
             graphics: GraphicsConfig::default(),
             size_source: None,
             pass_request: PassRequest::default(),
-            visibility_notice: None,
         }
     }
 }
@@ -482,8 +413,6 @@ where
     /// See [`PassRequest`]: another thread's requests, and this window's
     /// events.
     pass_request: PassRequest,
-    /// See [`VisibilityNotice`].
-    visibility: Visibility,
     tick_gaps: TickGaps,
     /// How many frames in a row the surface has refused to present. Reset by
     /// the first one that lands. See [`REFUSALS_BEFORE_BACKOFF`].
@@ -660,7 +589,6 @@ where
             close_requested,
             repaint_after: Some(start_time),
             pass_request: settings.pass_request.clone(),
-            visibility: Visibility { notice: settings.visibility_notice.clone(), seen: None },
             tick_gaps: TickGaps::default(),
             refused_presents: 0,
             retry_after: None,
@@ -1526,11 +1454,6 @@ where
                         // refusals and not on this.
                         self.refused_presents = 0;
                         self.retry_after = None;
-                    }
-                    // Last, with this window's own state settled: the app may
-                    // reenter it through its host.
-                    if let Some((notice, seen)) = self.visibility.occluded(*occluded) {
-                        (notice.0)(seen);
                     }
                 }
                 baseview::WindowEvent::WillClose => {}
@@ -2472,33 +2395,5 @@ mod resize_tests {
             SurfaceSize::clamped(PhySize::new(0, 9000), 8192).get(),
             PhySize::new(1, 8192)
         );
-    }
-}
-
-#[cfg(test)]
-mod visibility_tests {
-    use super::{Visibility, VisibilityNotice};
-    use std::sync::{Arc, Mutex};
-
-    /// An occlusion and a reveal are told once each, with what they mean;
-    /// a repeat of either, as a view moving to a window that reads the same
-    /// sends, tells nothing; and with no notice set nothing is told.
-    #[test]
-    fn an_occlusion_and_a_reveal_are_told_once_each() {
-        let told = Arc::new(Mutex::new(Vec::new()));
-        let log = told.clone();
-        let mut visibility = Visibility {
-            notice: Some(VisibilityNotice::new(move |seen| log.lock().unwrap().push(seen))),
-            seen: None,
-        };
-        for occluded in [false, true, true, false, false] {
-            if let Some((notice, seen)) = visibility.occluded(occluded) {
-                (notice.0)(seen);
-            }
-        }
-        assert_eq!(*told.lock().unwrap(), [true, false, true]);
-
-        let mut silent = Visibility::default();
-        assert!(silent.occluded(true).is_none(), "no notice set, nothing to tell");
     }
 }

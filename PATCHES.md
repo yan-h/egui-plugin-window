@@ -415,21 +415,6 @@ egui's input state reads that field, and ends a pane drag on focus loss by it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
 AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
-- **Patch 27** (`src/window.rs`, `src/lib.rs`, `Cargo.toml`, `tests/visibility_notice.rs`; for harmonigraph): tell the app when its view stops being seen, and when it is seen again.
-Since baseview's patch 9 no frame runs for a view nobody can see, so an app that finishes work from its frames has no chance to finish it as the view goes unseen:
-harmonigraph ends an open host parameter gesture from a pass, and one begun just before its editor was hidden stayed touched in Bitwig until the editor was seen again.
-`EguiWindowSettings::with_visibility_notice` takes a `VisibilityNotice`, an `Fn(bool)` called with whether the view is seen,
-from the `Occluded` arm of `on_event`, after the arm's own state is settled, so it follows baseview's occlusion notice:
-once at open with the state the window opens in (inside `open_parented`, after the build closure), on each change of the window's occlusion state, and when the view moves to a window that reads differently.
-`Visibility` keeps what it last told, so a repeat, as a move between two windows that read the same sends, tells nothing.
-A view hidden inside a visible window raises no notice and gets no call.
-On a reveal the call comes before the reveal's frame (baseview patch 3), so that frame draws what it changed.
-It runs inside baseview's handler borrow, as every event does:
-an event the callback causes on this window, such as a resize, is queued and handled after it returns, closing the window does not touch that borrow, and a nested event loop, whose mouse and key events take the borrow infallibly, is the one thing the callback must not run.
-No notice set, nothing changes. otonal sets none.
-The unit test `an_occlusion_and_a_reveal_are_told_once_each` checks one call per change in both directions and none without a notice;
-`tests/visibility_notice.rs` (no harness, as baseview's native tests) opens a real editor window in a window never put on screen and checks it is told once that it is not seen, and not again when moved to a second such window.
-A reveal cannot be produced headless, since a window reads as visible only once the window server says so; and the native test checks nothing on a machine with no GPU adapter, which it says.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

@@ -50,12 +50,6 @@ wgpu = [
 name = "egui_baseview"
 path = "src/lib.rs"
 
-[[test]]
-name = "visibility_notice"
-path = "tests/visibility_notice.rs"
-harness = false
-required-features = ["wgpu"]
-
 [dependencies.baseview]
 version = "0.1.4"
 
@@ -146,19 +140,3 @@ optional = true
 [dev-dependencies.egui]
 version = "0.35.0"
 features = ["default_fonts"]
-
-# The native test's off-screen windows (tests/visibility_notice.rs).
-[target.'cfg(target_os = "macos")'.dev-dependencies.objc2-app-kit]
-version = "0.3.2"
-default-features = false
-features = [
-    "NSApplication",
-    "NSGraphics",
-    "NSResponder",
-    "NSView",
-    "NSWindow",
-]
-
-[target.'cfg(target_os = "macos")'.dev-dependencies.objc2-foundation]
-version = "0.3"
-features = ["NSGeometry"]
