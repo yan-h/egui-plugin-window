@@ -15,17 +15,25 @@ use crate::Size;
 /// The answer is asked again at each event that can change it: the window's
 /// occlusion notification, `viewDidHide` and `viewDidUnhide` (sent for an
 /// ancestor too), a move to another window or to none, and every display
-/// link callback, which re-asks it before deciding whether to run a frame.
-/// So a lost occlusion notification is repaired by the next link callback
-/// while the link fires (it goes on firing for a covered window), and is not
-/// caught while it does not (a minimized or ordered-out window's link stops).
+/// link callback the frame divisor lets through, which re-asks it before
+/// deciding whether to run a frame. So a lost occlusion notification is
+/// repaired up to `divisor` refreshes late while the link fires (it goes on
+/// firing for a covered window), and is not caught while it does not (a
+/// minimized or ordered-out window's link stops).
 ///
 /// Called on the main thread, never inside the window handler's borrow: a
 /// loss found while the handler is running (a frame, an event) is told once
 /// that borrow ends, so the app may take its own locks and call its host from
-/// it. It can arrive inside the app's own calls that move or hide the view:
-/// a view moved into a window not yet on screen reads as not seen, so a
-/// plug-in that moves its editor into a window of its own is told at the move.
+/// it. A loss found and undone within one such borrow is still told.
+/// Otherwise it runs synchronously inside AppKit's own hide and move
+/// callbacks, so it can arrive inside the app's own calls that hide the view
+/// or move it between windows: a view moved into a window not yet on screen
+/// reads as not seen, so a plug-in that moves its editor into a window of its
+/// own is told at the move.
+///
+/// Not protected: a host that destroys the editor synchronously from inside
+/// a host call the notice makes. The closure itself is kept alive for its
+/// call, but what the app does after the host returns is the app's to guard.
 #[derive(Clone)]
 pub struct UnseenNotice(Arc<dyn Fn() + Send + Sync>);
 
@@ -34,6 +42,7 @@ impl UnseenNotice {
         UnseenNotice(Arc::new(notice))
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn tell(&self) {
         (self.0)()
     }

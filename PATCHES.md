@@ -128,7 +128,7 @@ Events still reach the handler while the view is unseen, and the first frame onc
 the reveal's (patch 3) for a window back from occlusion, the next link callback once the link resumes for a view un-hidden in a visible window.
 It retires patch 4's 10 Hz watchdog and with it patch 1's timer.
 `tests/unseen_frames.rs` (no harness, as `host_keys.rs`) sends `displayLinkFired:` by hand to a view in a window that is not on screen, and to one in no window, and checks that neither runs a frame;
-a frame running for a view that can be seen is not tested, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
+a frame running for a view that can be seen is tested in `tests/unseen_notice.rs` (patch 11), which sets what the window's occlusion reads as through the `testing` feature, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
 macOS only.
 - **Patch 10** (`src/event.rs`, `src/platform/macos/view.rs`, `tests/press_location.rs`, `Cargo.toml`): a press and a release carry where they happened, and a withheld exit waits for the release it follows.
 `MouseEvent::ButtonPressed` and `ButtonReleased` have a `position`, in the logical coordinates `CursorMoved` reports.
@@ -150,15 +150,19 @@ Since patch 9 no frame runs for a view nobody can see, so work an app finishes f
 harmonigraph ends an open host parameter gesture from a pass, and one begun just before its editor was hidden stayed touched in Bitwig until the editor was seen again.
 `WindowOpenOptions::with_unseen_notice` takes an `UnseenNotice`, an `Fn()`.
 "Seen" is patch 9's frame test, `is_visible`, with one owner: `check_seen` asks it, keeps the answer in `seen`, and tells the app when it turns from seen to not seen.
-It is asked at every event that can change it: the occlusion notification, `viewDidHide` and `viewDidUnhide` (new `ViewImpl` methods, sent for an ancestor too), a move to another window or to none, and the frame gate on every link callback, which repairs a lost notification while the link fires.
+It is asked at every event that can change it: the occlusion notification, `viewDidHide` and `viewDidUnhide` (new `ViewImpl` methods, sent for an ancestor too), a move to another window or to none, and the frame gate on every link callback the frame divisor lets through, which repairs a lost notification up to `divisor` refreshes late while the link fires.
 Never at open (`seen` starts false and the open samples it), never on a reveal, never twice for one loss, and not once the window is closed, whose own removal from its window would otherwise read as one.
 It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame`, `trigger_event` or `trigger_deferrable_event` lets go, so the app may call its host, whatever the host does to this window in return.
-It can arrive inside the app's own calls that hide the view or move it between windows: a view moved into a window not yet on screen reads as not seen, so a plug-in moving its editor into a window of its own is told at the move.
-A notification lost while no frame runs (a minimized or ordered-out window, whose link stops) is not caught until an event asks again.
+A loss found and undone within one borrow (the view taken out of a window and put back in a visible one during a frame) is still told, and nothing is told once the window is closed, a loss owed from inside the closing borrow included.
+`pay_unseen` calls a clone of the notice, so a host destroying the editor from inside the call cannot free the closure while it runs.
+Otherwise it runs synchronously inside AppKit's own hide and move callbacks, so it can arrive inside the app's own calls that hide the view or move it between windows: a view moved into a window not yet on screen reads as not seen, so a plug-in moving its editor into a window of its own is told at the move.
+Unprotected: a notification lost while no frame runs (a minimized or ordered-out window, whose link stops), which is not caught until an event asks again;
+and a host that destroys the editor synchronously from inside a host call the notice makes, past what the app guards itself.
 No notice set, nothing changes; otonal sets none.
 The `testing` feature (native tests only; no plug-in enables it) lets a test set what a window's occlusion state reads as (`baseview::testing::set_window_shows`), since a window reads as visible only once the window server says so, which a test process may never see.
 `tests/unseen_notice.rs` (no harness, as `host_keys.rs`), which `ci.sh` runs with that feature, checks one call each for the view hidden, an ancestor hidden, the window occluded by notification, the window occluded with the notification lost and the next link callback finding it, and the view taken out of its window;
-none at open, on a reveal, on a move back, for a repeat, or at close; and that a loss found inside a frame is told after it.
+none at open, on a reveal, on a move back, for a repeat, or at close;
+and that a loss found inside a frame, inside an event `trigger_event` delivers and inside one `trigger_deferrable_event` delivers is told after each lets go, by a notice that sends the view an event through `trigger_event`, whose infallible borrow would panic inside the handler's.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

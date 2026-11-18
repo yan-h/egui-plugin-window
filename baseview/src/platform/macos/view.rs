@@ -286,8 +286,9 @@ impl BaseviewView {
     ///
     /// Called at each event that can change it: the window's occlusion
     /// notification, `viewDidHide` and `viewDidUnhide`, a move to another
-    /// window or to none, and the frame gate, which asks on every link
-    /// callback and so repairs a lost notification while the link fires.
+    /// window or to none, and the frame gate, which asks on every callback the
+    /// frame divisor lets through and so repairs a lost notification, up to
+    /// `divisor` refreshes late, while the link fires.
     fn check_seen(this: ViewRef<Self>) -> bool {
         let seen = Self::is_visible(this);
         // Not after the window is closed: its own removal from the window is
@@ -303,13 +304,23 @@ impl BaseviewView {
     /// (a frame or an event is running, and the loss was found inside it):
     /// then whoever holds the borrow pays it as the borrow ends, so the app
     /// is never called inside it and may call its host, whatever the host
-    /// does to this window in return.
+    /// does to this window in return. A loss found and undone within one
+    /// borrow (the view taken out of its window and put back in a visible one
+    /// during a frame) is still told: it was owed when found.
+    ///
+    /// Nothing is told once the window is closed, including a loss owed from
+    /// inside the borrow that closed it.
     fn pay_unseen(this: ViewRef<Self>) {
         if !this.unseen_owed.get() || this.window_handler.try_borrow_mut().is_err() {
             return;
         }
         this.unseen_owed.set(false);
-        if let Some(notice) = &this.unseen_notice {
+        if this.state.closed.get() {
+            return;
+        }
+        // A clone, so a host that destroys the editor from inside the call,
+        // and with it this view, cannot free the closure while it runs.
+        if let Some(notice) = this.unseen_notice.clone() {
             notice.tell();
         }
     }

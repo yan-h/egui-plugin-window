@@ -1,7 +1,11 @@
 //! AppKit needs the process's main thread, which the Rust test harness does not use.
 //!
 //! The unseen notice told once for each way a view stops being seen, and
-//! never inside the window handler's borrow. A window reads as visible only
+//! never inside the window handler's borrow: the notice sends the view an
+//! event through `trigger_event`, whose borrow is infallible and panics if
+//! the handler is still borrowed, and a loss found inside a frame, inside an
+//! event `trigger_event` delivers and inside one `trigger_deferrable_event`
+//! delivers is each told as that borrow ends. A window reads as visible only
 //! once the window server says so, which a test process may never see, so
 //! the window's occlusion state is set through `baseview::testing` (the
 //! `testing` feature); the view's own hiding, its ancestors' and its window
@@ -10,7 +14,7 @@
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use baseview::{
@@ -46,6 +50,19 @@ mod macos {
         told_while_handling: AtomicBool,
         /// The next frame hides its own view, as an app's frame might.
         hide_in_frame: AtomicBool,
+        /// The next event hides its own view: one `trigger_event` delivers
+        /// (a pointer entering) or one `trigger_deferrable_event` delivers
+        /// (the view giving up the keyboard).
+        hide_on_event: AtomicBool,
+        /// The next frame hides its view and then closes its window.
+        close_in_frame: AtomicBool,
+        /// The view, for the notice to send an event to.
+        view: AtomicPtr<NSView>,
+    }
+
+    fn hide(window: &mut Window) {
+        let RawWindowHandle::AppKit(raw) = window.raw_window_handle() else { unreachable!() };
+        unsafe { &*raw.ns_view.cast::<NSView>() }.setHidden(true);
     }
 
     struct Handler {
@@ -57,16 +74,19 @@ mod macos {
             self.shared.handling.store(true, Ordering::Relaxed);
             self.shared.frames.fetch_add(1, Ordering::Relaxed);
             if self.shared.hide_in_frame.swap(false, Ordering::Relaxed) {
-                let RawWindowHandle::AppKit(raw) = window.raw_window_handle() else {
-                    unreachable!()
-                };
-                let view = unsafe { &*raw.ns_view.cast::<NSView>() };
-                view.setHidden(true);
+                hide(window);
+            }
+            if self.shared.close_in_frame.swap(false, Ordering::Relaxed) {
+                hide(window);
+                window.close();
             }
             self.shared.handling.store(false, Ordering::Relaxed);
         }
 
-        fn on_event(&mut self, _: &mut Window, _: Event) -> EventStatus {
+        fn on_event(&mut self, window: &mut Window, _: Event) -> EventStatus {
+            if self.shared.hide_on_event.swap(false, Ordering::Relaxed) {
+                hide(window);
+            }
             EventStatus::Ignored
         }
     }
@@ -102,6 +122,12 @@ mod macos {
                 if noticed.handling.load(Ordering::Relaxed) {
                     noticed.told_while_handling.store(true, Ordering::Relaxed);
                 }
+                // What a host call might do: an event through `trigger_event`,
+                // which panics if the handler is still borrowed.
+                let view = noticed.view.load(Ordering::Relaxed);
+                if let Some(view) = unsafe { view.as_ref() } {
+                    let _: () = unsafe { msg_send![view, mouseEntered: view] };
+                }
             });
             let mut handle = Window::open_parented(
                 &Parent(Retained::as_ptr(&host).cast_mut().cast()),
@@ -110,6 +136,7 @@ mod macos {
             );
             let RawWindowHandle::AppKit(raw) = handle.raw_window_handle() else { unreachable!() };
             let view = unsafe { Retained::retain(raw.ns_view.cast::<NSView>()).unwrap() };
+            shared.view.store(Retained::as_ptr(&view).cast_mut(), Ordering::Relaxed);
             let link: Retained<CADisplayLink> = unsafe {
                 msg_send![&*view, displayLinkWithTarget: &*view, selector: sel!(displayLinkFired:)]
             };
@@ -172,9 +199,26 @@ mod macos {
             );
             view.setHidden(false);
 
+            // Inside an event `trigger_event` delivers: the pointer entering.
+            shared.hide_on_event.store(true, Ordering::Relaxed);
+            let _: () = unsafe { msg_send![&*view, mouseEntered: &*view] };
+            assert_eq!(told(), 7, "a loss found inside trigger_event is told as it ends");
+            view.setHidden(false);
+
+            // Inside one `trigger_deferrable_event` delivers: the keyboard lost.
+            shared.hide_on_event.store(true, Ordering::Relaxed);
+            let _: bool = unsafe { msg_send![&*view, resignFirstResponder] };
+            assert_eq!(told(), 8, "a loss found inside a deferrable event is told as it ends");
+            view.setHidden(false);
+
+            // A loss owed inside the frame that closes the window.
+            shared.close_in_frame.store(true, Ordering::Relaxed);
+            assert!(fire(), "the frame that closes its window runs");
+            shared.view.store(std::ptr::null_mut(), Ordering::Relaxed);
+            assert_eq!(told(), 8, "a loss owed inside the closing frame was told after the close");
             link.invalidate();
             handle.close();
-            assert_eq!(told(), 6, "closing the window is not told");
+            assert_eq!(told(), 8, "closing the window is not told");
             baseview::testing::set_window_shows(None);
             window.close();
             println!("unseen notice: each loss told once, outside the handler, none at close");
