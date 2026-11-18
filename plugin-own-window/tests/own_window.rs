@@ -15,7 +15,7 @@ mod macos {
     use objc2_foundation::{
         NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults,
     };
-    use plugin_own_window::{Limits, Move, OwnSize, OwnWindow};
+    use plugin_own_window::{EditorSize, Limits, Move, OwnSize, OwnWindow};
 
     /// Not either plug-in's, so their remembered frames stay as they are,
     /// and this process's alone: every checkout's test binary at one commit
@@ -520,6 +520,89 @@ mod macos {
         println!("own window: it reopens where it was, at the editor's size");
     }
 
+    /// (i) The shared size sequence on a real window. Opened out with an
+    /// editor size below the limits, the own window's size is the editor's at
+    /// once; while out, the host's `set_size` changes nothing and the editor's
+    /// own ask is the window's to grant, without the host; the player's
+    /// resize reaches the next frame; docked again, the host is asked for the
+    /// editor's size.
+    fn editor_size(mtm: MainThreadMarker) {
+        forget();
+        let limits = Limits {
+            min: (320, 240),
+            max: (2000, 2000),
+        };
+        let editor = EditorSize::new(&name(), (300, 200), LIMITS);
+        // Raised since the editor's size was accepted, as a zoom raises it.
+        editor.set_limits(limits);
+        assert_eq!(editor.size(), (300, 200));
+        // SAFETY: a plain window, created and owned on the main thread.
+        let host_window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(300.0, 200.0)),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { host_window.setReleasedWhenClosed(false) };
+        let host = host_window.contentView().unwrap();
+        let view = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(300.0, 200.0)),
+        );
+        host.addSubview(&view);
+        let opened = editor.open();
+        // SAFETY: both views are alive, the one inside the other.
+        unsafe {
+            editor.attach(
+                Retained::as_ptr(&host).cast_mut().cast(),
+                Retained::as_ptr(&view).cast_mut().cast(),
+                true,
+                Some(Box::new(|| true)),
+            );
+        }
+        assert!(editor.offered() && editor.is_out());
+        assert_eq!(editor.size(), (320, 240), "the move out's size, at once");
+        let unasked = || -> bool { panic!("the host is asked while the view is out") };
+        assert_eq!(editor.next_frame(opened, unasked), Some((320, 240)));
+
+        assert!(editor.host_set_size((900, 900), || panic!("asked while open")));
+        assert_eq!(editor.size(), (320, 240), "the host sized the editor");
+        editor.request_size((500, 320));
+        assert_eq!(editor.next_frame(opened, unasked), Some((500, 320)));
+        let own_window = view.window().unwrap();
+        assert_eq!(content(&own_window), NSSize::new(500.0, 320.0));
+
+        // Sized past its limits in code, which AppKit allows: the editor
+        // takes the size within them.
+        own_window.setContentSize(NSSize::new(2400.0, 100.0));
+        assert_eq!(editor.next_frame(opened, unasked), Some((2000, 240)));
+        own_window.setContentSize(NSSize::new(640.0, 400.0));
+        assert_eq!(editor.next_frame(opened, unasked), Some((640, 400)));
+        assert_eq!(editor.size(), (640, 400));
+
+        editor.want(false);
+        assert!(turn_until(|| !editor.is_out()), "no dock");
+        let asked = Cell::new(0);
+        let host_asked = || {
+            asked.set(asked.get() + 1);
+            assert_eq!(editor.reported_size(), (640, 400));
+            true
+        };
+        assert_eq!(editor.next_frame(opened, host_asked), None);
+        assert_eq!(asked.get(), 1, "the host was not asked for the size");
+        assert!(editor.host_set_size((700, 450), || panic!("asked while open")));
+        assert_eq!(editor.next_frame(opened, || panic!()), Some((700, 450)));
+
+        editor.close();
+        assert!(!editor.is_open() && !editor.offered());
+        assert!(same(view.window(), &*host_window));
+        host_window.close();
+        println!("own window: the shared size sequence");
+    }
+
     pub fn run() {
         // Dropped last, once every window is gone: a window saves its frame
         // again as it goes, so forgetting earlier would leave one behind.
@@ -529,7 +612,7 @@ mod macos {
             let _app = NSApplication::sharedApplication(mtm);
             // Each in a pool of its own, so its windows, and their hold on
             // the autosave name, are gone before the next.
-            let tests: [fn(MainThreadMarker); 8] = [
+            let tests: [fn(MainThreadMarker); 9] = [
                 undock_then_dock,
                 close_click,
                 click_dock_undock,
@@ -538,6 +621,7 @@ mod macos {
                 resize_keeps_top_left,
                 limits_follow,
                 reopen_remembered,
+                editor_size,
             ];
             for test in tests {
                 autoreleasepool(|_| test(mtm));
