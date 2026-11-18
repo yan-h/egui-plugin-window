@@ -103,6 +103,18 @@ mod macos {
         NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
     }
 
+    /// Turn the run loop until `done`, for at most two seconds: a loaded
+    /// machine can take longer than one turn's worth to run a move.
+    fn turn_until(done: impl Fn() -> bool) -> bool {
+        for _ in 0..40 {
+            if done() {
+                return true;
+            }
+            turn();
+        }
+        done()
+    }
+
     fn same<T>(a: Option<Retained<T>>, b: &T) -> bool {
         a.is_some_and(|a| std::ptr::eq(&*a, b))
     }
@@ -270,11 +282,23 @@ mod macos {
         let f = fixture(mtm, true);
         let first = f.view.window().unwrap();
         f.own.want(false);
-        turn();
+        assert!(
+            turn_until(|| !f.own.is_out()),
+            "no dock: {:?}",
+            f.moves.borrow()
+        );
         f.own.want(true);
-        turn();
+        assert!(
+            turn_until(|| f.own.is_out()),
+            "no undock: {:?}",
+            f.moves.borrow()
+        );
         let second = f.view.window().unwrap();
-        assert!(!std::ptr::eq(&*first, &*second));
+        assert!(
+            !std::ptr::eq(&*first, &*second),
+            "the same window after a dock and an undock: {:?}",
+            f.moves.borrow()
+        );
         // SAFETY: the window's delegate, the crate's agent, answers it.
         let agent: Option<Retained<AnyObject>> = unsafe { msg_send![&*second, delegate] };
         let agent = agent.unwrap();
