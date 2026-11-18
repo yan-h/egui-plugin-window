@@ -575,6 +575,10 @@ mod macos {
         let own_window = view.window().unwrap();
         assert_eq!(content(&own_window), NSSize::new(500.0, 320.0));
 
+        // Sized past its limits in code, which AppKit allows: the editor
+        // takes the size within them.
+        own_window.setContentSize(NSSize::new(2400.0, 100.0));
+        assert_eq!(editor.next_frame(opened, unasked), Some((2000, 240)));
         own_window.setContentSize(NSSize::new(640.0, 400.0));
         assert_eq!(editor.next_frame(opened, unasked), Some((640, 400)));
         assert_eq!(editor.size(), (640, 400));

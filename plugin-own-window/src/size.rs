@@ -156,15 +156,23 @@ impl NativeResize {
             });
     }
 
+    /// Whether `lifetime` is the open editor's.
+    fn current(&self, lifetime: u64) -> bool {
+        self.lifetime.load(Ordering::Acquire) == lifetime && self.is_open()
+    }
+
     /// Called before input and layout, with no application lock held. Only
     /// the processed proposal is consumed; an intervening restore remains
-    /// queued.
+    /// queued. The proposal is held to `limits` as it is taken, since a
+    /// queued request outlives a change of limits: the host is told, and the
+    /// own window given, the same size.
     fn next_frame(
         &self,
         lifetime: u64,
+        limits: Limits,
         request: impl FnOnce((u32, u32)) -> bool,
     ) -> Option<(u32, u32)> {
-        if self.lifetime.load(Ordering::Acquire) != lifetime || !self.is_open() {
+        if !self.current(lifetime) {
             return None;
         }
         // Dequeue before negotiating: `in_flight` owns the proposal during
@@ -173,7 +181,7 @@ impl NativeResize {
             .state
             .fetch_and(!(REQUEST_MASK | PENDING), Ordering::AcqRel);
         if before & PENDING != 0 {
-            let proposed = decode_size(before >> 30);
+            let proposed = limits.clamp(decode_size(before >> 30));
             let revision = self.host_revision.load(Ordering::Acquire);
             let accepted = if proposed == decode_size(before) {
                 false // Already at the requested size: consumed without a host call.
@@ -183,7 +191,7 @@ impl NativeResize {
                 request(proposed)
             };
             self.in_flight.store(0, Ordering::Release);
-            if self.lifetime.load(Ordering::Acquire) != lifetime || !self.is_open() {
+            if !self.current(lifetime) {
                 return None;
             }
             let host_changed = self.host_revision.load(Ordering::Acquire) != revision;
@@ -206,16 +214,6 @@ impl NativeResize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opened(u64);
 
-/// Where the own window stands for this open editor.
-enum Slot {
-    /// The host has not attached the editor.
-    Closed,
-    /// Attached: in an AppKit host's view with its window once
-    /// [`EditorSize::attach`] has run, or without one under a parent no
-    /// window of its own can open from.
-    Open(Option<Arc<OwnWindow>>),
-}
-
 /// The editor's size and its own window, one per plug-in instance, made
 /// wherever the plug-in keeps its saved state and read from any thread.
 ///
@@ -233,10 +231,11 @@ pub struct EditorSize {
     /// [`Limits`] in one word, which the plug-in may replace while open.
     limits: AtomicU64,
     native: NativeResize,
-    /// Locked only to read or swap it, never across a call into the window
-    /// or a drop of one: those can draw a frame on the spot, whose size
-    /// source comes back here.
-    own: Mutex<Slot>,
+    /// The own window, from [`Self::attach`] to [`Self::close`]. Locked only
+    /// to read or swap it, never across a call into the window or a drop of
+    /// one: those can draw a frame on the spot, whose size source comes back
+    /// here.
+    own: Mutex<Option<Arc<OwnWindow>>>,
 }
 
 impl std::fmt::Debug for EditorSize {
@@ -258,21 +257,18 @@ impl EditorSize {
             name: name.to_owned(),
             limits: AtomicU64::new(limits.encode()),
             native: NativeResize::default(),
-            own: Mutex::new(Slot::Closed),
+            own: Mutex::new(None),
         };
         state.native.initialize(limits.held().clamp(size));
         Arc::new(state)
     }
 
-    fn slot(&self) -> MutexGuard<'_, Slot> {
+    fn slot(&self) -> MutexGuard<'_, Option<Arc<OwnWindow>>> {
         self.own.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn own_window(&self) -> Option<Arc<OwnWindow>> {
-        match &*self.slot() {
-            Slot::Open(own) => own.clone(),
-            Slot::Closed => None,
-        }
+        self.slot().clone()
     }
 
     /// The size the host last accepted, or the own window gave, in logical
@@ -323,13 +319,10 @@ impl EditorSize {
         if self.limits().clamp(size) != size {
             return false;
         }
-        let owned = match &*self.slot() {
-            Slot::Closed => None,
-            Slot::Open(own) => Some(own.clone()),
-        };
-        let owns = match owned {
-            Some(own) => own.is_some_and(|own| own.is_out()),
-            None => cfg!(target_os = "macos") && opens_out(),
+        let owns = if self.is_open() {
+            self.is_out()
+        } else {
+            cfg!(target_os = "macos") && opens_out()
         };
         if !owns {
             self.native.accept(size);
@@ -340,7 +333,6 @@ impl EditorSize {
     /// The host attached the editor: open, before its window opens, whose
     /// size source hands the result to [`Self::next_frame`].
     pub fn open(&self) -> Opened {
-        *self.slot() = Slot::Open(None);
         Opened(self.native.open())
     }
 
@@ -366,8 +358,10 @@ impl EditorSize {
         }
         let own = OwnWindow::new(&self.name);
         // In the slot before the move out, which can draw a frame on the
-        // spot whose size source asks it.
-        *self.slot() = Slot::Open(Some(own.clone()));
+        // spot whose size source asks it. One already there, from a shell
+        // that attached twice, goes once the lock is let go.
+        let previous = self.slot().replace(own.clone());
+        drop(previous);
         let editor: Weak<Self> = Arc::downgrade(self);
         // From a move out the editor's size is the own window's, which a
         // save must find at once rather than at the next frame, since none
@@ -392,6 +386,9 @@ impl EditorSize {
         opened: Opened,
         request_resize: impl Fn() -> bool,
     ) -> Option<(u32, u32)> {
+        if !self.native.current(opened.0) {
+            return None;
+        }
         let own = self.own_window();
         if let Some(own) = &own {
             let limits = self.limits();
@@ -405,11 +402,7 @@ impl EditorSize {
                 None => {}
             }
         }
-        self.native.next_frame(opened.0, |size| {
-            // Clamped here rather than only where it was queued: a queued
-            // request outlives a change of limits, and the own window
-            // applies what it is given within the limits it last had.
-            let size = self.limits().clamp(size);
+        self.native.next_frame(opened.0, self.limits(), |size| {
             match own.as_ref().and_then(|own| own.resize(size)) {
                 // Taken as a host's `set_size` during the request is: the
                 // size the window applied, which the proposal then does not
@@ -449,8 +442,8 @@ impl EditorSize {
     /// yet negotiated is installed for saving and the next open. The window
     /// is let go here, so it does not keep the editor's views alive.
     pub fn close(&self) {
-        let slot = std::mem::replace(&mut *self.slot(), Slot::Closed);
-        if let Slot::Open(Some(own)) = slot {
+        let own = self.slot().take();
+        if let Some(own) = own {
             own.close();
         }
         self.native.close();
@@ -467,12 +460,20 @@ mod tests {
         min: (640, 360),
         max: (4096, 4096),
     };
+    /// Limits no test's size reaches, for the negotiation alone.
+    const WIDE: Limits = Limits {
+        min: (1, 1),
+        max: (32767, 32767),
+    };
 
     fn state() -> (NativeResize, u64) {
         let state = NativeResize::default();
         state.initialize(INITIAL);
         let lifetime = state.open();
-        assert_eq!(state.next_frame(lifetime, |_| panic!()), Some(INITIAL));
+        assert_eq!(
+            state.next_frame(lifetime, WIDE, |_| panic!()),
+            Some(INITIAL)
+        );
         (state, lifetime)
     }
 
@@ -482,7 +483,7 @@ mod tests {
         state.restore((800, 500));
         assert_eq!(state.reported_size(), INITIAL);
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 assert_eq!(state.reported_size(), (800, 500));
                 assert_eq!(state.size(), INITIAL);
                 false
@@ -493,11 +494,13 @@ mod tests {
         state.close();
         let lifetime = state.open();
         assert_eq!(
-            state.next_frame(lifetime, |_| panic!("refused request must not return")),
+            state.next_frame(lifetime, WIDE, |_| panic!(
+                "refused request must not return"
+            )),
             Some(INITIAL)
         );
         state.restore((800, 500));
-        assert_eq!(state.next_frame(lifetime, |_| true), Some((800, 500)));
+        assert_eq!(state.next_frame(lifetime, WIDE, |_| true), Some((800, 500)));
         assert_eq!(state.reported_size(), (800, 500));
     }
 
@@ -506,7 +509,7 @@ mod tests {
         let (state, lifetime) = state();
         state.restore((800, 500));
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 state.restore((800, 500));
                 false
             }),
@@ -515,7 +518,7 @@ mod tests {
         assert_eq!(state.size(), INITIAL);
         let mut requests = 0;
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 requests += 1;
                 true
             }),
@@ -529,7 +532,7 @@ mod tests {
         let (state, lifetime) = state();
         state.restore((800, 500));
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 state.restore((800, 500));
                 true
             }),
@@ -537,7 +540,7 @@ mod tests {
         );
         assert_ne!(state.state.load(Ordering::Acquire) & PENDING, 0);
         assert_eq!(
-            state.next_frame(lifetime, |_| panic!("already accepted size")),
+            state.next_frame(lifetime, WIDE, |_| panic!("already accepted size")),
             None
         );
         assert_eq!(state.state.load(Ordering::Acquire) & PENDING, 0);
@@ -548,7 +551,7 @@ mod tests {
         let (state, lifetime) = state();
         state.restore((800, 500));
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 state.accept((800, 500));
                 state.accept((900, 600));
                 state.restore((1000, 700));
@@ -556,9 +559,12 @@ mod tests {
             }),
             Some((900, 600))
         );
-        assert_eq!(state.next_frame(lifetime, |_| true), Some((1000, 700)));
+        assert_eq!(
+            state.next_frame(lifetime, WIDE, |_| true),
+            Some((1000, 700))
+        );
         state.accept((1000, 700));
-        assert_eq!(state.next_frame(lifetime, |_| panic!()), None);
+        assert_eq!(state.next_frame(lifetime, WIDE, |_| panic!()), None);
     }
 
     #[test]
@@ -566,19 +572,19 @@ mod tests {
         let (state, lifetime) = state();
         state.restore((800, 500));
         state.restore(INITIAL);
-        assert_eq!(state.next_frame(lifetime, |_| panic!()), None);
+        assert_eq!(state.next_frame(lifetime, WIDE, |_| panic!()), None);
         state.restore((800, 500));
         state.close();
         state.restore((900, 600));
         let next_lifetime = state.open();
-        assert_eq!(state.next_frame(lifetime, |_| panic!()), None);
+        assert_eq!(state.next_frame(lifetime, WIDE, |_| panic!()), None);
         assert_eq!(
-            state.next_frame(next_lifetime, |_| panic!()),
+            state.next_frame(next_lifetime, WIDE, |_| panic!()),
             Some((900, 600))
         );
         state.restore((800, 500));
         let mut reopened_lifetime = 0;
-        state.next_frame(next_lifetime, |_| {
+        state.next_frame(next_lifetime, WIDE, |_| {
             state.close();
             reopened_lifetime = state.open();
             state.restore((1000, 700));
@@ -586,7 +592,7 @@ mod tests {
         });
         assert_eq!(state.size(), (900, 600));
         assert_eq!(
-            state.next_frame(reopened_lifetime, |_| true),
+            state.next_frame(reopened_lifetime, WIDE, |_| true),
             Some((1000, 700))
         );
     }
@@ -596,13 +602,35 @@ mod tests {
         let (state, lifetime) = state();
         state.restore((800, 500));
         assert_eq!(
-            state.next_frame(lifetime, |_| {
+            state.next_frame(lifetime, WIDE, |_| {
                 state.restore(INITIAL);
                 true
             }),
             Some((800, 500))
         );
-        assert_eq!(state.next_frame(lifetime, |_| true), Some(INITIAL));
+        assert_eq!(state.next_frame(lifetime, WIDE, |_| true), Some(INITIAL));
+    }
+
+    /// A request queued before the limits rose is held to the new ones as
+    /// it is taken: the host is told, and the editor takes, a size within
+    /// them.
+    #[test]
+    fn a_queued_request_is_held_to_limits_raised_since() {
+        let editor = EditorSize::new("test", INITIAL, LIMITS);
+        let opened = editor.open();
+        editor.next_frame(opened, || panic!());
+        editor.request_size((700, 400));
+        editor.set_limits(Limits {
+            min: (800, 450),
+            max: (4096, 4096),
+        });
+        assert_eq!(
+            editor.next_frame(opened, || {
+                assert_eq!(editor.reported_size(), (800, 450));
+                true
+            }),
+            Some((800, 450))
+        );
     }
 
     /// Limits outside what the word holds are held to it rather than
