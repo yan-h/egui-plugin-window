@@ -32,8 +32,8 @@ mod macos {
     #[derive(Debug, PartialEq)]
     enum Seen {
         Moved(Point),
-        Pressed(MouseButton),
-        Released(MouseButton),
+        Pressed(MouseButton, Point),
+        Released(MouseButton, Point),
     }
 
     struct Handler(Arc<Mutex<Vec<Seen>>>);
@@ -44,8 +44,12 @@ mod macos {
         fn on_event(&mut self, _: &mut Window, event: Event) -> EventStatus {
             let seen = match event {
                 Event::Mouse(MouseEvent::CursorMoved { position, .. }) => Seen::Moved(position),
-                Event::Mouse(MouseEvent::ButtonPressed { button, .. }) => Seen::Pressed(button),
-                Event::Mouse(MouseEvent::ButtonReleased { button, .. }) => Seen::Released(button),
+                Event::Mouse(MouseEvent::ButtonPressed { button, position, .. }) => {
+                    Seen::Pressed(button, position)
+                }
+                Event::Mouse(MouseEvent::ButtonReleased { button, position, .. }) => {
+                    Seen::Released(button, position)
+                }
                 _ => return EventStatus::Ignored,
             };
             self.0.lock().unwrap().push(seen);
@@ -105,25 +109,27 @@ mod macos {
             let RawWindowHandle::AppKit(raw) = handle.raw_window_handle() else { unreachable!() };
             let view = unsafe { Retained::retain(raw.ns_view.cast::<NSView>()).unwrap() };
 
-            // No move before either: the press is the first the handler hears
-            // of the pointer, and the release lands outside the view, where a
-            // drag out of the window ends. The view is flipped, so a window
-            // point (x, y) is (x, 100 - y) in it.
+            // A release no press of this view owes is not reported at all.
+            send_mouse(&view, NSEventType::LeftMouseUp, NSPoint::new(50.0, 50.0));
+            assert_eq!(*seen.lock().unwrap(), []);
+
+            // No move before either: each button carries where it happened, and
+            // the release lands outside the view, where a drag out of the
+            // window ends. The view is flipped, so a window point (x, y) is
+            // (x, 100 - y) in it.
             send_mouse(&view, NSEventType::LeftMouseDown, NSPoint::new(30.0, 70.0));
             send_mouse(&view, NSEventType::LeftMouseUp, NSPoint::new(150.0, 20.0));
             assert_eq!(
                 *seen.lock().unwrap(),
                 [
-                    Seen::Moved(Point::new(30.0, 30.0)),
-                    Seen::Pressed(MouseButton::Left),
-                    Seen::Moved(Point::new(150.0, 80.0)),
-                    Seen::Released(MouseButton::Left),
+                    Seen::Pressed(MouseButton::Left, Point::new(30.0, 30.0)),
+                    Seen::Released(MouseButton::Left, Point::new(150.0, 80.0)),
                 ]
             );
 
             handle.close();
             host_window.close();
-            println!("press location: a press and a release report where they happened");
+            println!("press location: a press and a release carry where they happened");
         });
     }
 }

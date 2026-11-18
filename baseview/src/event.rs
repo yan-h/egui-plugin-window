@@ -48,6 +48,10 @@ pub enum MouseEvent {
     ButtonPressed {
         /// The button that was pressed.
         button: MouseButton,
+        /// Where it was pressed, in the logical coordinates `CursorMoved`
+        /// reports: the event's own location, never a position remembered
+        /// from an earlier move, which goes stale while another app is active.
+        position: Point,
         /// The modifiers that were held down just before the event.
         modifiers: Modifiers,
     },
@@ -56,6 +60,10 @@ pub enum MouseEvent {
     ButtonReleased {
         /// The button that was released.
         button: MouseButton,
+        /// Where it was released, in the logical coordinates `CursorMoved`
+        /// reports: the event's own location, never a position remembered
+        /// from an earlier move, which goes stale while another app is active.
+        position: Point,
         /// The modifiers that were held down just before the event.
         modifiers: Modifiers,
     },

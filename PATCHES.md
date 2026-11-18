@@ -86,6 +86,7 @@ Reporting the exit there is what breaks the drag:
 a consumer told the pointer is gone stops following it (egui turns `CursorLeft` into `PointerGone`), so a slider dragged a pixel past the window edge let go under the hand still holding it.
 The `CursorLeft` is now withheld rather than dropped —
 paid from the matching mouse-up, and from the frame tick for the releases that never arrive at all (a press that was never ours, a host that took the release), both gated on `NSEvent::pressedMouseButtons` rather than on a count of the presses this view has seen, which a release delivered elsewhere would leave wrong forever.
+Patch 10 adds that it also waits while a reported press is owed its release, so the release always comes first.
 `mouseEntered:` clears it and stays silent, so enter and exit remain paired.
 macOS only;
 the other backends have no drag-time exit.
@@ -129,17 +130,20 @@ It retires patch 4's 10 Hz watchdog and with it patch 1's timer.
 `tests/unseen_frames.rs` (no harness, as `host_keys.rs`) sends `displayLinkFired:` by hand to a view in a window that is not on screen, and to one in no window, and checks that neither runs a frame;
 a frame running for a view that can be seen is not tested, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
 macOS only.
-- **Patch 10** (`src/platform/macos/view.rs`, `tests/press_location.rs`, `Cargo.toml`): report where a press or a release happened before the button.
-A button event carries no position, so the consumer puts it where it last saw the pointer, and that can be stale:
-`mouseMoved:` arrives only while the app is active (`ActiveInActiveApp`), and egui-baseview keeps the last position across `CursorLeft` (its Patch 11).
-A click into the editor from another app (`acceptsFirstMouse:` says yes) landed on whatever was under the pointer when it last left.
-Now `mouseDown:`, `mouseUp:` and their right and other counterparts send a `CursorMoved` at the event's own location, with its modifiers, ahead of the button, as the wheel does.
-Not gated on the view's bounds as the wheel's is:
-a press reaches the view only inside it, and a release outside it ends a drag out of the window, which must end where the pointer is, as every `mouseDragged:` already reports.
-Sent only with a release that is reported, so a `mouseUp:` dropped as already paid cannot bring back a pointer whose exit was paid.
-Patch 6's synthesised release has no event, and still lands at the consumer's last position;
-patch 5's withheld exit and its order, release then exit, are unchanged.
-`tests/press_location.rs` (no harness, as `host_keys.rs`) sends a mouse-down and a mouse-up outside the view, with no move before either, and checks a move to each location precedes its button.
+- **Patch 10** (`src/event.rs`, `src/platform/macos/view.rs`, `tests/press_location.rs`, `Cargo.toml`): a press and a release carry where they happened, and a withheld exit waits for the release it follows.
+`MouseEvent::ButtonPressed` and `ButtonReleased` have a `position`, in the logical coordinates `CursorMoved` reports.
+Upstream's carried none, so the consumer put a button where it last saw the pointer, and that goes stale:
+`mouseMoved:` arrives only while the app is active (`ActiveInActiveApp`), so a click into the editor from another app (`acceptsFirstMouse:` says yes) landed on whatever was under the pointer when it last left.
+`mouseDown:`, `mouseUp:` and their right and other counterparts fill it from the event's own location, through the one conversion (`view_point`) every move, drag and wheel goes through;
+a release outside the view, the end of a drag out of the window, carries that outside point.
+Patch 6's synthesised release has no event, and carries where the pointer is now (the window's `mouseLocationOutsideOfEventStream`);
+a settle runs only for a visible view, which is in a window, so it never lacks one.
+The wheel keeps its move ahead, gated on the view's bounds, since its event has no position.
+Patch 5's exit now waits for an owed release as well as for a button the OS holds (`exit_waits`), at `mouseExited:` and at every settle:
+a frame between the hardware button going up and its queued `mouseUp:` being dispatched otherwise paid the exit ahead of the release.
+A release that never comes is repaired by Patch 6 within two settles, and the exit is paid in the same settle.
+`tests/press_location.rs` (no harness, as `host_keys.rs`) sends a `mouseUp:` no press owes, then a press and a release outside the view with no move before either, and checks the first is not reported and the other two carry their points;
+a unit test beside the mask tests checks `exit_waits`.
 macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
@@ -149,7 +153,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, a press and a release at their own location, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -263,18 +267,12 @@ a present is decoupled from the transaction carrying the new bounds, so the resi
 set before the acquire —
 the flag is captured there), folds new content and new bounds into one commit.
 Costs a main-thread wait per present, so it is not left on.
-- **Patch 11** (1 line, `src/window.rs`): keep the last pointer position when
-the pointer leaves.
-A press and a release are the two baseview events that carry no position of their own, so both are sent at the pointer's last position (`pointer_position`) —
-and both are DROPPED when it is `None`, which `CursorLeft` set.
-baseview's Patch 10 now sends a move to the event's own location ahead of every real press and release, so those always find a fresh position;
-the release baseview's Patch 6 synthesises for a stuck button has no event and no move, and is the one still delivered at the last position, after the exit as often as not.
-Such a release thrown away here left egui, which deliberately keeps a drag alive across `PointerGone`, believing the button was held forever:
-every `ScrollArea` in the editor refuses the wheel while anything at all is being dragged (`end_stranded_drag` in `harmonigraph-ui` is the shell-side backstop for it).
-The position is the pointer's last known one, which is where that release lands;
-`None` now means only that the pointer has never been seen, which is the case the guard is for.
+- **Patch 11** (retired with `pointer_position`): kept the last pointer position when the pointer left,
+since a press and a release were sent at it, and a release after `CursorLeft` was dropped, leaving egui believing the button held forever.
+baseview's Patch 10 gives both events their own position, so nothing is stored here any more:
+a button is delivered at its event's point under the current zoom, behind a `PointerMoved` to that point (`push_pointer_button`), because egui judges click against drag from moves alone and would count a distant release with no move before it as a click.
 - **Patch 12** (`src/renderer/wgpu/renderer.rs`, `src/window.rs`):
-the same layer as Patch 10, across the other discontinuity —
+the same layer as egui-baseview's Patch 10, across the other discontinuity —
 a window coming back from occlusion.
 Nothing can present while it is hidden, so the layer still holds the frame from before it went away and the compositor puts that back on screen the instant the window is visible again, before this process is told anything.
 `Renderer::window_occluded` hides the layer while the window is occluded, so the re-expose composites the host's background instead of a picture that has stopped being true:
