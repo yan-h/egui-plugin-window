@@ -390,14 +390,6 @@ where
     /// The last time handed to egui, which a frame never goes back past.
     egui_time: f64,
     egui_input: egui::RawInput,
-    /// Where the pointer was last seen, which is where a button event happens:
-    /// baseview reports a press and a release without one. `None` only before
-    /// the first move — and it is not cleared when the pointer leaves, because
-    /// a release still lands where the pointer was (see `CursorLeft`).
-    /// In logical (host) pixels, as baseview reports it, and converted to
-    /// points with the zoom of the event that is delivered at it, so a click
-    /// right after a zoom change lands where the pointer is.
-    pointer_position: Option<baseview::Point>,
     current_cursor_icon: baseview::MouseCursor,
 
     renderer: Renderer,
@@ -583,7 +575,6 @@ where
             start_time,
             egui_time: 0.0,
             egui_input,
-            pointer_position: None,
             current_cursor_icon: baseview::MouseCursor::Default,
 
             renderer,
@@ -1344,31 +1335,30 @@ where
                 } => {
                     self.update_modifiers(modifiers);
 
-                    self.pointer_position = Some(*position);
                     let pos = pointer_in_points(position, self.egui_ctx.zoom_factor());
                     self.egui_input.events.push(egui::Event::PointerMoved(pos));
                 }
-                baseview::MouseEvent::ButtonPressed { button, modifiers } => {
-                    self.update_modifiers(modifiers);
-
-                    let zoom = self.egui_ctx.zoom_factor();
-                    let modifiers = self.egui_input.modifiers;
-                    if let Some(event) =
-                        pointer_button(self.pointer_position, zoom, *button, true, modifiers)
-                    {
-                        self.egui_input.events.push(event);
-                    }
+                baseview::MouseEvent::ButtonPressed {
+                    button,
+                    position,
+                    modifiers,
                 }
-                baseview::MouseEvent::ButtonReleased { button, modifiers } => {
+                | baseview::MouseEvent::ButtonReleased {
+                    button,
+                    position,
+                    modifiers,
+                } => {
                     self.update_modifiers(modifiers);
 
-                    let zoom = self.egui_ctx.zoom_factor();
-                    let modifiers = self.egui_input.modifiers;
-                    if let Some(event) =
-                        pointer_button(self.pointer_position, zoom, *button, false, modifiers)
-                    {
-                        self.egui_input.events.push(event);
-                    }
+                    let pressed = matches!(event, baseview::MouseEvent::ButtonPressed { .. });
+                    push_pointer_button(
+                        &mut self.egui_input.events,
+                        position,
+                        self.egui_ctx.zoom_factor(),
+                        *button,
+                        pressed,
+                        self.egui_input.modifiers,
+                    );
                 }
                 baseview::MouseEvent::WheelScrolled {
                     delta: scroll_delta,
@@ -1398,14 +1388,6 @@ where
                     });
                 }
                 baseview::MouseEvent::CursorLeft => {
-                    // `PointerGone` is egui's business; the last position is
-                    // ours, and forgetting it here is how a release goes
-                    // missing. A button event is only ever sent with a
-                    // position, so one that arrives after the exit — the
-                    // release of a drag let go outside the window — would be
-                    // dropped, and egui would believe the button is held
-                    // forever: every ScrollArea in the editor refuses the
-                    // wheel while anything at all is being dragged.
                     self.egui_input.events.push(egui::Event::PointerGone);
                 }
                 _ => {}
@@ -1679,6 +1661,8 @@ fn update_focus_input(
         baseview::WindowEvent::Unfocused => false,
         _ => return,
     };
+    // Both on purpose, neither a duplicate of the other: harmonigraph ends a
+    // gesture on the focus-lost event, and egui reads the flag.
     input.focused = focused;
     input.events.push(egui::Event::WindowFocused(focused));
     if let Some(viewport) = input.viewports.get_mut(&viewport_id) {
@@ -1698,21 +1682,35 @@ fn pointer_in_points(position: &baseview::Point, zoom: f32) -> Pos2 {
     pos2(position.x as f32, position.y as f32) / zoom
 }
 
-/// A press or release at the pointer's last position, in points under the
-/// zoom it is delivered at; `None` before the pointer has been seen.
-fn pointer_button(
-    position: Option<baseview::Point>,
+/// A press or release at the position baseview gives it, in points under the
+/// zoom it is delivered at, so a click right after a zoom change lands where
+/// the pointer is.
+///
+/// Always behind a move to the same point. egui judges a click from moves
+/// alone (`has_moved_too_much_for_a_click` is set only by `PointerMoved`), so
+/// a release at a distant point with no move before it would still count as
+/// a click. The move costs nothing when the pointer is already there: egui's
+/// movement clock is reset by the click as well, for tooltips, and its
+/// velocity is sampled once per pass from the latest position, not per event.
+/// Asking the context whether egui already has the point would mean reading
+/// this pass's queued events too, for no change in what egui decides.
+fn push_pointer_button(
+    events: &mut Vec<egui::Event>,
+    position: &baseview::Point,
     zoom: f32,
     button: baseview::MouseButton,
     pressed: bool,
     modifiers: egui::Modifiers,
-) -> Option<egui::Event> {
-    Some(egui::Event::PointerButton {
-        pos: pointer_in_points(&position?, zoom),
-        button: crate::translate::translate_mouse_button(button)?,
+) {
+    let Some(button) = crate::translate::translate_mouse_button(button) else { return };
+    let pos = pointer_in_points(position, zoom);
+    events.push(egui::Event::PointerMoved(pos));
+    events.push(egui::Event::PointerButton {
+        pos,
+        button,
         pressed,
         modifiers,
-    })
+    });
 }
 
 /// Calculate screen rectangle in points.
@@ -2310,26 +2308,36 @@ mod resize_tests {
         }
     }
 
-    /// A press with no move since the zoom changed lands where the pointer
-    /// is under the new zoom, not where the old one put it.
+    /// A press with no move before it lands where baseview says, under the
+    /// zoom it is delivered at; a release far from it is no click, and one
+    /// beside it is.
     #[test]
-    fn a_press_after_a_zoom_change_lands_under_the_pointer() {
-        let seen = Some(baseview::Point::new(400.0, 200.0));
-        assert_eq!(pointer_in_points(&seen.unwrap(), 1.0), pos2(400.0, 200.0));
-        let press = pointer_button(
-            seen,
-            2.0,
-            baseview::MouseButton::Left,
-            true,
-            egui::Modifiers::NONE,
-        );
-        assert!(matches!(
-            press,
-            Some(egui::Event::PointerButton { pos, pressed: true, .. }) if pos == pos2(200.0, 100.0)
-        ));
-        let unseen =
-            pointer_button(None, 2.0, baseview::MouseButton::Left, true, egui::Modifiers::NONE);
-        assert!(unseen.is_none(), "no position before the pointer is seen");
+    fn a_button_lands_at_its_own_position_and_a_long_drag_is_no_click() {
+        let clicked = |release: baseview::Point| {
+            let mut events = Vec::new();
+            for (position, pressed) in [(baseview::Point::new(400.0, 200.0), true), (release, false)]
+            {
+                push_pointer_button(
+                    &mut events,
+                    &position,
+                    2.0,
+                    baseview::MouseButton::Left,
+                    pressed,
+                    egui::Modifiers::NONE,
+                );
+            }
+            assert!(events.iter().any(|event| matches!(
+                event,
+                egui::Event::PointerButton { pos, pressed: true, .. } if *pos == pos2(200.0, 100.0)
+            )));
+            let context = egui::Context::default();
+            let raw = egui::RawInput { events, ..Default::default() };
+            let mut clicked = false;
+            let _ = context.run_ui(raw, |ui| clicked = ui.ctx().input(|i| i.pointer.any_click()));
+            clicked
+        };
+        assert!(clicked(baseview::Point::new(401.0, 200.0)), "a click in place");
+        assert!(!clicked(baseview::Point::new(600.0, 200.0)), "a drag is no click");
     }
 
     #[test]

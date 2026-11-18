@@ -303,11 +303,9 @@ impl BaseviewView {
 
         // Before the frame, so a pointer that has quietly stopped being ours is
         // gone by the time anything is drawn from where it was. The button
-        // first only to order the two within the settle: a release belongs
-        // ahead of the exit it precedes, the same way `report_release` sends
-        // one before paying a withheld exit. Neither reads the other's work —
-        // `settle_pointer_exit` asks the OS, not `buttons_reported_down` — so
-        // the other order would cost no time, just deliver `CursorLeft` first.
+        // first: a withheld exit waits for every release still owed
+        // (`exit_waits`), so a stuck release repaired here lets the exit be
+        // paid in the same settle rather than the next one.
         Self::settle_stuck_buttons(this);
         Self::settle_pointer_exit(this);
 
@@ -329,7 +327,8 @@ impl BaseviewView {
             && this.view.window().is_some_and(|window| window_shows(&window))
     }
 
-    /// Pay an exit `mouse_exited` held back, once no button is down.
+    /// Pay an exit `mouse_exited` held back, once no button is down and no
+    /// release is owed (`exit_waits`).
     ///
     /// Called from every mouse-up, which is the ordinary way a drag off the
     /// window ends, and from the frame tick, which is the only way the ones
@@ -338,8 +337,17 @@ impl BaseviewView {
     /// enter and exit from the tracking area but no buttons at all — and
     /// whenever the host takes the release out of our hands. Either way the
     /// button is up and the OS says so, so the tick catches it within a frame.
+    ///
+    /// The owed release is what keeps "release, then exit" in order: a frame
+    /// can run between the hardware button going up and its queued `mouseUp:`
+    /// being dispatched, and the OS alone would pay the exit there, ahead of
+    /// the release. A release that never comes is repaired by
+    /// `settle_stuck_buttons` within two settles, which `trigger_frame` runs
+    /// first, so the exit is paid in the settle that repairs it.
     fn settle_pointer_exit(this: ViewRef<Self>) {
-        if !this.exit_withheld.get() || NSEvent::pressedMouseButtons() != 0 {
+        if !this.exit_withheld.get()
+            || exit_waits(NSEvent::pressedMouseButtons(), this.buttons_reported_down.get())
+        {
             return;
         }
         this.exit_withheld.set(false);
@@ -392,6 +400,12 @@ impl BaseviewView {
             return;
         }
 
+        // Where the pointer is now, since there is no event to say where the
+        // button went up. A settle runs only for a visible view, which is in a
+        // window, so this does not return; if it did, the release stays owed
+        // to the next settle rather than being sent from a made-up position.
+        let Some(window) = this.view.window() else { return };
+        let position = Self::view_point(this, window.mouseLocationOutsideOfEventStream());
         this.buttons_reported_down.set(this.buttons_reported_down.get() & !confirmed);
         let modifiers = make_modifiers(this.keyboard_state.last_mods());
         // Which bit stands for which button is `button_bit`'s to answer, asked
@@ -404,7 +418,7 @@ impl BaseviewView {
             if confirmed & button_bit(button) != 0 {
                 Self::trigger_deferrable_event(
                     this,
-                    Event::Mouse(ButtonReleased { button, modifiers }),
+                    Event::Mouse(ButtonReleased { button, position, modifiers }),
                 );
             }
         }
@@ -417,6 +431,7 @@ impl BaseviewView {
             this,
             Event::Mouse(ButtonPressed {
                 button,
+                position: Self::view_point(this, event.locationInWindow()),
                 modifiers: make_modifiers(event.modifierFlags()),
             }),
         );
@@ -437,6 +452,9 @@ impl BaseviewView {
                 this,
                 Event::Mouse(ButtonReleased {
                     button,
+                    // Outside the view for a drag let go past the window's
+                    // edge, where the gesture ends.
+                    position: Self::view_point(this, event.locationInWindow()),
                     modifiers: make_modifiers(event.modifierFlags()),
                 }),
             );
@@ -444,6 +462,13 @@ impl BaseviewView {
         // After the release, never before it: the gesture ends where the
         // pointer still is, and only then is the pointer gone.
         Self::settle_pointer_exit(this);
+    }
+
+    /// A point in the window's coordinates, in the view's: the one conversion
+    /// every pointer position this view reports goes through.
+    fn view_point(this: ViewRef<Self>, in_window: NSPoint) -> Point {
+        let point = this.view.convertPoint_fromView(in_window, None);
+        Point { x: point.x, y: point.y }
     }
 
     fn send_deferred_events(this: ViewRef<Self>, window_handler: &mut dyn WindowHandler) {
@@ -702,14 +727,10 @@ impl ViewImpl for BaseviewView {
     }
 
     fn mouse_moved(this: ViewRef<Self>, event: &NSEvent) {
-        let point = this.view.convertPoint_fromView(event.locationInWindow(), None);
-
-        let position = Point { x: point.x, y: point.y };
-
         Self::trigger_event(
             this,
             Event::Mouse(MouseEvent::CursorMoved {
-                position,
+                position: Self::view_point(this, event.locationInWindow()),
                 modifiers: make_modifiers(event.modifierFlags()),
             }),
         );
@@ -720,20 +741,21 @@ impl ViewImpl for BaseviewView {
         //
         // `scrollWheel:` carries a location but no CursorMoved, and consumers
         // route a wheel by where they last saw the pointer — egui hands it to
-        // whatever its stored pointer position is over. That position can be
-        // absent or stale, because `mouseMoved:` only arrives through the
-        // tracking area (`ActiveInActiveApp`) and `mouseExited:` clears it: a
-        // window opened with the cursor already inside it, or one whose app was
-        // not frontmost while the cursor moved in, has never been told where the
-        // pointer is. The wheel then did nothing at all, or landed on whatever
-        // was under the LAST known position — scrolling one pane while the
-        // cursor sat over another.
+        // whatever its pointer position is over, and its wheel event has no
+        // position of its own. That position can be absent or stale, because
+        // `mouseMoved:` only arrives through the tracking area
+        // (`ActiveInActiveApp`) and `mouseExited:` makes egui forget it
+        // (`PointerGone`): a window opened with the cursor already inside it, or
+        // one whose app was not frontmost while the cursor moved in, has never
+        // been told where the pointer is. The wheel then did nothing at all, or
+        // landed on whatever was under the LAST known position — scrolling one
+        // pane while the cursor sat over another.
         //
         // The event's own location is always right, so send it first and the
         // wheel is applied where the cursor actually is. Gated on the location
         // being inside the view so inertial scrolling that outlives the pointer
         // leaving cannot resurrect it.
-        let point = this.view.convertPoint_fromView(event.locationInWindow(), None);
+        let point = Self::view_point(this, event.locationInWindow());
         let bounds = this.view.bounds();
         let inside = point.x >= bounds.origin.x
             && point.y >= bounds.origin.y
@@ -743,7 +765,7 @@ impl ViewImpl for BaseviewView {
             Self::trigger_event(
                 this,
                 Event::Mouse(MouseEvent::CursorMoved {
-                    position: Point { x: point.x, y: point.y },
+                    position: point,
                     modifiers: make_modifiers(event.modifierFlags()),
                 }),
             );
@@ -910,8 +932,10 @@ impl ViewImpl for BaseviewView {
         // button is up — `settle_pointer_exit` is where it is paid, and it
         // reads the button state from the OS rather than from a count of the
         // presses this view has seen, which a release delivered elsewhere
-        // would leave wrong forever.
-        if NSEvent::pressedMouseButtons() != 0 {
+        // would leave wrong forever. It also waits while a release is owed:
+        // the button can read up while its `mouseUp:` is still queued, and the
+        // release belongs ahead of the exit (`exit_waits`).
+        if exit_waits(NSEvent::pressedMouseButtons(), this.buttons_reported_down.get()) {
             this.exit_withheld.set(true);
             return;
         }
@@ -1004,9 +1028,16 @@ fn buttons_owed_release(reported_down: u8, os_pressed: usize) -> u8 {
     reported_down & !os_down
 }
 
+/// Whether the pointer's exit waits: while the OS reports a button down, the
+/// drag is still ours; while a reported press is still owed its release, the
+/// release comes first, wherever the OS says the button is.
+fn exit_waits(os_pressed: usize, releases_owed: u8) -> bool {
+    os_pressed != 0 || releases_owed != 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{button_bit, buttons_owed_release, link_paces_frame};
+    use super::{button_bit, buttons_owed_release, exit_waits, link_paces_frame};
     use crate::MouseButton;
 
     /// The refreshes a divided link draws on, out of `callbacks` at 144 Hz
@@ -1136,6 +1167,18 @@ mod tests {
         for os in [0, 0b001, 0b010, 0b100, 0b111] {
             assert_eq!(buttons_owed_release(0, os), 0);
         }
+    }
+
+    /// The exit waits for a button the OS holds down, and for a release still
+    /// owed after the hardware button is up: its `mouseUp:` is queued, and
+    /// paying the exit first would deliver the release after it.
+    #[test]
+    fn the_exit_waits_for_the_release_it_follows() {
+        let left = button_bit(MouseButton::Left);
+        assert!(exit_waits(0b001, left), "a drag in progress");
+        assert!(exit_waits(0, left), "up at the OS, its mouseUp: still queued");
+        assert!(exit_waits(0b001, 0), "a press that was never ours");
+        assert!(!exit_waits(0, 0), "nothing held and nothing owed");
     }
 }
 
