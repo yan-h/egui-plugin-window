@@ -418,14 +418,10 @@ The window holds one and `Renderer::render` takes one, so the renderer has no si
 A size from the `SizeSource`, an `InnerSize` command, a `Queue::resize` (recorded in the pass and applied after it, as the frame divisor is) and a `Resized` event go through it;
 one it refuses is dropped and the window keeps its size, where the `.max(1.0)` conversions they replace clamped only zero.
 The opening size, which has nothing to fall back to, is clamped into 1 to the limit on each side instead.
-- **Patch 24** (`src/window.rs` `scroll_in_points`): a precise scroll divides by egui's zoom alone (#2).
-baseview forwards AppKit's `scrollingDeltaX/Y`, which are in points, the pointer's unit; upstream divided them by the backing scale as well,
-so every trackpad scroll moved half as far on a 2x display. winit, behind egui-winit, gives the same delta.
-A line scroll is unchanged.
 The device limit is read only when a size arrives.
 `SurfaceSize` and `logical_size_for` have their own tests.
 - **Patch 24** (`src/window.rs`; from otonal's fork): egui's zoom factor in every points conversion, as egui-winit does.
-The screen rect, pointer positions, pixel wheel deltas and `InnerSize` commands use the native scale times `Context::zoom_factor`, and `render` tessellates at the pass's `pixels_per_point`;
+The screen rect and `InnerSize` commands use the native scale times `Context::zoom_factor`, pointer positions and pixel wheel deltas (Patch 28) the zoom alone, being logical already, and `render` tessellates at the pass's `pixels_per_point`;
 physical sizes, logical host sizes and the viewport's `native_pixels_per_point` stay native.
 `points_per_pixel` is computed from the two rather than stored.
 Unzoomed, nothing changes; zoomed, upstream laid the UI out for a window larger than its own and missed its pointer.
@@ -439,6 +435,10 @@ egui's input state reads that field, and ends a pane drag on focus loss by it.
 AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
 - **Patch 27** (`src/window.rs`; for harmonigraph): `EguiWindowSettings::with_unseen_notice` hands an app's `UnseenNotice` to baseview (its patch 11), which owns the test and the call.
+- **Patch 28** (`src/window.rs` `scroll_in_points`): a precise scroll divides by egui's zoom alone (#2).
+baseview forwards AppKit's `scrollingDeltaX/Y`, which are in points, the pointer's unit; Patch 24 divided them by the backing scale as well, as upstream did,
+so every trackpad scroll moved half as far on a 2x display. winit, behind egui-winit, gives the same delta.
+A line scroll is unchanged.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
