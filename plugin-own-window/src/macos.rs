@@ -280,7 +280,9 @@ impl OwnWindow {
     /// into its own window if it is to be `out`. Called once, outside any
     /// frame (see the crate documentation). `closed` tells the host the user
     /// closed the window, and returns whether it could; it may destroy the
-    /// editor during the call, and is let go at [`Self::close`].
+    /// editor during the call, and is let go at [`Self::close`]. With `out`,
+    /// `moving` is called inside this call, so it is not made under a lock
+    /// `moving` takes.
     ///
     /// # Safety
     ///
@@ -418,7 +420,9 @@ impl OwnWindow {
     /// takes it out of whichever window it is in: show the host's window
     /// again, should the host reuse it, close the editor's own, call off
     /// everything pending, and let go of everything. Repeated calls are
-    /// harmless, and dropping the last reference does the same.
+    /// harmless, and dropping the last reference does the same. With the
+    /// view out, both call `moving` inside them, and `close` can itself run
+    /// inside `closed`, so neither is made under a lock `moving` takes.
     pub fn close(&self) {
         self.local().close();
     }
@@ -804,9 +808,6 @@ impl Agent {
         own.upgrade()
     }
 
-    /// `selector` on the run loop's turn `delay` seconds from now. The run
-    /// loop retains the agent until then, so the host destroying the editor
-    /// cannot free it mid-call.
     /// `selector` with `object` on the run loop's turn `delay` seconds from
     /// now. The run loop retains the agent and the object until then, so the
     /// host destroying the editor cannot free either mid-call.

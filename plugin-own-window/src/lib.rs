@@ -119,7 +119,10 @@ pub enum OwnSize {
 /// ([`OwnWindow::open`]'s `moving`), before the view moves, so that what
 /// the shell keeps of the editor's size, a save's among it, is right at once
 /// rather than at the next frame, which does not come while the editor
-/// cannot be seen.
+/// cannot be seen. It is called on the main thread inside the call that
+/// moves the view: `open` with `out`, the run loop's deferred move,
+/// `close`, and the last drop. A lock it takes must not be held across any
+/// of those, or the main thread deadlocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {
     /// Into its own window, whose content is this size, in logical points:

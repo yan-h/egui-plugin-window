@@ -120,7 +120,11 @@ mod macos {
         }
     }
 
-    const NAME: &str = "plugin-own-window host keys test";
+    /// This process's alone: every checkout's test binary at one commit has
+    /// the same name, and so the same defaults domain.
+    fn name() -> String {
+        format!("plugin-own-window host keys test {}", std::process::id())
+    }
 
     fn turn() {
         NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
@@ -158,7 +162,7 @@ mod macos {
                 unreachable!()
             };
             let view = unsafe { Retained::retain(raw.ns_view.cast::<NSView>()).unwrap() };
-            let own = OwnWindow::new(NAME);
+            let own = OwnWindow::new(&name());
             // SAFETY: both views are alive.
             unsafe {
                 own.open(
@@ -197,7 +201,7 @@ mod macos {
         // Once every window is gone, which saves its frame again as it goes.
         autoreleasepool(|_| {
             turn();
-            let key = NSString::from_str(&format!("NSWindow Frame {NAME}"));
+            let key = NSString::from_str(&format!("NSWindow Frame {}", name()));
             NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
         });
     }

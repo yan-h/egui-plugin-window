@@ -17,8 +17,13 @@ mod macos {
     };
     use plugin_own_window::{Limits, Move, OwnSize, OwnWindow};
 
-    /// Not either plug-in's, so their remembered frames stay as they are.
-    const NAME: &str = "plugin-own-window test";
+    /// Not either plug-in's, so their remembered frames stay as they are,
+    /// and this process's alone: every checkout's test binary at one commit
+    /// has the same name, and so the same defaults domain, and two runs at
+    /// once would read and forget each other's frame.
+    fn name() -> String {
+        format!("plugin-own-window test {}", std::process::id())
+    }
     const LIMITS: Limits = Limits {
         min: (100, 100),
         max: (2000, 2000),
@@ -37,7 +42,7 @@ mod macos {
 
     /// Forget the frame AppKit remembers under the test's name.
     fn forget() {
-        let key = NSString::from_str(&format!("NSWindow Frame {NAME}"));
+        let key = NSString::from_str(&format!("NSWindow Frame {}", name()));
         NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
     }
 
@@ -62,7 +67,7 @@ mod macos {
             NSRect::new(NSPoint::ZERO, NSSize::new(size.0, size.1)),
         );
         host.addSubview(&view);
-        let own = OwnWindow::new(NAME);
+        let own = OwnWindow::new(&name());
         let closes = Rc::new(Cell::new(0));
         let counting = closes.clone();
         let moves = Rc::new(RefCell::new(Vec::new()));
