@@ -254,6 +254,12 @@ mod macos {
         turn();
         assert_eq!(f.closes.get(), 1, "the host was told twice");
         assert!(f.own.is_out(), "the close button closed the window itself");
+        // The host destroys the editor on a later turn; a dock asked for
+        // meanwhile is not made.
+        f.own.want(false);
+        turn();
+        assert!(f.own.is_out(), "docked after the host was told");
+        assert!(matches!(f.moves.borrow().last(), Some(Move::Out(_))));
         close(f);
         println!("own window: a click tells the host once, and a dock ahead of it drops it");
     }
@@ -411,7 +417,8 @@ mod macos {
     }
 
     /// (d) A size the plug-in asks for keeps the window's top-left corner,
-    /// is returned as applied, and is not reported back.
+    /// is held to the limits, is returned as applied, and is not reported
+    /// back.
     fn resize_keeps_top_left(mtm: MainThreadMarker) {
         let f = fixture(mtm, true);
         let own_window = f.view.window().unwrap();
@@ -421,8 +428,16 @@ mod macos {
         assert_eq!(top_left(&own_window), before);
         assert_eq!(content(&own_window), NSSize::new(500.0, 320.0));
         assert_eq!(f.own.take_size(LIMITS), None);
+        // A size outside the limits, as a shell holding a stale one asks.
+        let limits = Limits {
+            min: (200, 150),
+            max: (800, 600),
+        };
+        f.own.take_size(limits);
+        assert_eq!(f.own.resize((1000, 100)), Some((800, 150)));
+        assert_eq!(content(&own_window), NSSize::new(800.0, 150.0));
         close(f);
-        println!("own window: a resize keeps the top-left corner");
+        println!("own window: a resize keeps the top-left corner, within the limits");
     }
 
     /// (e) The limits a later frame gives replace the earlier ones.
