@@ -50,8 +50,12 @@ wgpu = [
 name = "egui_baseview"
 path = "src/lib.rs"
 
+# By path, so a project's pin of this crate carries the baseview from the
+# same commit: a project naming baseview itself must pin the same commit, or
+# it builds two baseviews whose types do not meet.
 [dependencies.baseview]
 version = "0.1.4"
+path = "../baseview"
 
 [dependencies.copypasta]
 version = "0.10"
