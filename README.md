@@ -30,13 +30,24 @@ so a project's headless tests build on Linux.
 
 ## Using it from a project
 
-Pin a commit in the project's root `Cargo.toml`:
+Pin one commit in the project's root `Cargo.toml`. `egui-baseview` names
+`baseview` by path, so it brings the `baseview` from the same commit:
 
 ```toml
 [patch.crates-io]
-baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
 egui-baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
 ```
+
+`egui-baseview` re-exports `baseview` as `egui_baseview::baseview`, which is
+how a project should reach it. A project that also names `baseview` itself,
+directly or through another crate, patches it at the same commit:
+
+```toml
+baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
+```
+
+At another commit it builds a second `baseview`, whose types do not meet
+`egui-baseview`'s.
 
 `plugin-own-window` is no crates.io crate, so it is a plain git dependency of
 the crate that opens the editor, at the same commit:

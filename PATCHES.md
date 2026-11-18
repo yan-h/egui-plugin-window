@@ -442,6 +442,8 @@ A line scroll is unchanged.
 `Queue::resize` and the `ViewportCommand::InnerSize` arm are gone, so a size reaches the window only through the `SizeSource`, asked before each frame, or a `Resized` event;
 neither plug-in called the one or sent the other, and each was a second size write with its own rule for a size no surface can take.
 The window opens at the size its settings give, clamped to the device's limit.
+- **Patch 30** (`Cargo.toml`): `baseview` by path (#9), so a project's pin of `egui-baseview` brings the `baseview` from the same commit,
+and a project that names `baseview` at another commit builds two, whose types do not meet, rather than pairing two commits that may not agree.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
