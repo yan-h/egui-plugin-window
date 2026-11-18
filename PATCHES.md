@@ -1,6 +1,7 @@
 # Carried patches against upstream
 
-What these two crates change from their crates.io releases, patch by patch.
+What the two forked crates change from their crates.io releases, patch by
+patch, and, last, where `plugin-own-window`, which has no upstream, came from.
 The text is harmonigraph's record of its forks, moved here with the code.
 Issue numbers such as #1551 are harmonigraph's (yan-h/harmonigraph), as are
 `docs/archive/` and `tools/`; `ci.sh` is this repository's.
@@ -430,3 +431,31 @@ beyond this numbered inventory,
 and the toolchain and wgpu-hal costs of a future migration.
 - **Upstreaming**: declined (2026-07-19).
 Kept as local patches rather than proposed upstream.
+
+## plugin-own-window
+
+- **Source**: no upstream. It replaces the two plug-ins' copies of the editor's own window:
+otonal's `crates/otonal-plugin/src/editor/pop_out.rs`, read at otonal `d22d5533` (branch `switch-to-egui-plugin-window`),
+and harmonigraph's `crates/harmonigraph-plugin/src/editor/pop_out.rs`, read at harmonigraph `5a1fce2c` (branch `claude/no-work-left-to-frames`).
+otonal's was ported from harmonigraph's at harmonigraph `b154fe82`; which side each behaviour takes was settled in yan-h/otonal#1673 ("The own window, compared").
+- **From both, unchanged**: the window's level, Spaces and stacking behind other apps (`front_changed`, `tuck`, `settle`), the host's window concealed rather than hidden, moves deferred to the run loop, and the close button telling the host rather than closing.
+- **From harmonigraph's**: one object per open editor, owned by the editor handle, with weak references elsewhere and its cleanup on drop;
+the main-thread rule held by `dispatch2::MainThreadBound` rather than a `Mutex` and `unsafe impl Send`;
+the latch that tells the host of a close click once;
+no close button where there is no host to tell.
+- **From otonal's**: the minimum and maximum size given by the shell at every frame (`take_size`'s `Limits`), where harmonigraph's had a fixed minimum;
+`is_out`, for a host `set_size` arriving while the view is out, where harmonigraph kept a flag in its saved state;
+a move out before a pending dock was seen owes the host no resize;
+a pending look for an app's windows called off at a dock.
+- **In neither**:
+  - The agent's Objective-C class is built at run time under a process-unique name. Both plug-ins link this crate into one host process, whose class names are shared:
+  a class `define_class!` names at compile time would be registered by the first plug-in to load and used by the other with the first one's code and instance layout.
+  - One `moved` flag reports the size after a move either way: `Docked` after a dock, `Resized` with the window's size after a move out.
+  harmonigraph's copy instead cleared a pending host resize and stored the editor's size in its saved state as the view moved out; its adapter does both on that `Resized`.
+  - A close click is dropped when the view has been docked since, by the window it belongs to being gone, rather than by a dock cancelling it as well:
+  every move after `open` is a perform queued behind the click's, so no window opens again before it runs.
+  - No size is set between `setFrameUsingName:` and `setFrameAutosaveName:`: naming the frame restores a remembered one again (measured), so both copies' `setContentSize:` there was undone,
+  and their own window has reopened as large as it last was, the editor taking that size at its next frame. That is kept, and the comment saying otherwise is gone.
+  - A resize the plug-in asks for is plain `setContentSize:`, which keeps the window's top-left corner (measured on macOS 27; tested here); otonal's copy set the corner again by hand.
+  - It takes the two views as raw `NSView` pointers rather than either shell's window-handle types, so it depends on neither shell nor on `raw-window-handle`.
+- **Tests**: `tests/own_window.rs` (the moves, the close latch, a drop with calls pending, the resize's corner, the limits) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).

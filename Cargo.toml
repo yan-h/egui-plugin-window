@@ -1,10 +1,10 @@
-# One lockfile and one test command for the two crates. A project takes them
-# as git dependencies through its own `[patch.crates-io]`; this patch is the
-# same substitution for the tests here, since egui-baseview names baseview by
-# its crates.io version.
+# One lockfile and one test command for the three crates. A project takes the
+# two forks as git dependencies through its own `[patch.crates-io]`; this patch
+# is the same substitution for the tests here, since egui-baseview names
+# baseview by its crates.io version.
 [workspace]
 resolver = "2"
-members = ["baseview", "egui-baseview"]
+members = ["baseview", "egui-baseview", "plugin-own-window"]
 
 [patch.crates-io]
 baseview = { path = "baseview" }

@@ -1,7 +1,8 @@
 # AGENTS.md
 
-The egui editor window shared by harmonigraph and otonal: `baseview` (AppKit)
-and `egui-baseview` (egui and wgpu on it), as `README.md` describes.
+The egui editor window shared by harmonigraph and otonal: `baseview` (AppKit),
+`egui-baseview` (egui and wgpu on it) and `plugin-own-window` (the editor's
+own window), as `README.md` describes.
 `CLAUDE.md` is a symlink to this file.
 
 ## Stakes record (a draft for Yan to correct)
@@ -33,17 +34,20 @@ is Yan's to decide, as in the projects.
 - A session that changes tracked files works in a worktree under
   `.claude/worktrees/<name>/`, never in the main checkout, and ends in a
   draft pull request. Nothing merges unless Yan asks.
-- `./ci.sh` green is the definition of done. Neither crate is checked with
-  rustfmt or clippy yet: the two carry different formatting from upstream.
+- `./ci.sh` green is the definition of done. Neither forked crate is checked
+  with rustfmt or clippy yet: the two carry different formatting from
+  upstream. `plugin-own-window` is.
 - To try a change in a project before pushing it, build that project with
-  both crates pointed at this checkout:
+  the crates pointed at this checkout:
 
   ```
   cargo build -p <plugin> \
     --config 'patch.crates-io.baseview.path="<this checkout>/baseview"' \
-    --config 'patch.crates-io.egui-baseview.path="<this checkout>/egui-baseview"'
+    --config 'patch.crates-io.egui-baseview.path="<this checkout>/egui-baseview"' \
+    --config 'patch."https://github.com/yan-h/egui-plugin-window".plugin-own-window.path="<this checkout>/plugin-own-window"'
   ```
 
-  The override rewrites the two packages' `source` lines in that project's
+  The last line applies once the project depends on `plugin-own-window`.
+  The override rewrites the packages' `source` lines in that project's
   `Cargo.lock`; restore it with `git checkout Cargo.lock` afterwards, and do
   not commit it.
