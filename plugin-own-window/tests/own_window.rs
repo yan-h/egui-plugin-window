@@ -188,7 +188,7 @@ mod macos {
         assert!(f.own.offered());
         f.own.want(true);
         assert!(!f.own.is_out(), "a move is deferred to the run loop");
-        turn();
+        turn_until(|| f.own.is_out());
         assert!(f.own.is_out());
         assert_eq!(*f.moves.borrow(), [Move::Out((300, 200))]);
         let own_window = f.view.window().unwrap();
@@ -210,7 +210,7 @@ mod macos {
         f.view.setFrameSize(NSSize::new(400.0, 250.0));
 
         f.own.want(false);
-        turn();
+        turn_until(|| !f.own.is_out());
         assert!(!f.own.is_out());
         assert_eq!(*f.moves.borrow(), [Move::Out((300, 200)), Move::Back]);
         assert!(same(superview(&f.view), &*f.host));
@@ -237,16 +237,18 @@ mod macos {
         let own_window = f.view.window().unwrap();
         f.own.want(false);
         own_window.performClose(None);
+        turn_until(|| !f.own.is_out());
+        // The click's telling, queued behind the dock.
         turn();
         assert!(!f.own.is_out());
         assert_eq!(f.closes.get(), 0, "the docked editor was closed");
 
         f.own.want(true);
-        turn();
+        turn_until(|| f.own.is_out());
         let own_window = f.view.window().unwrap();
         own_window.performClose(None);
         own_window.performClose(None);
-        turn();
+        turn_until(|| f.closes.get() == 1);
         assert_eq!(f.closes.get(), 1);
         own_window.performClose(None);
         turn();
@@ -298,7 +300,7 @@ mod macos {
         };
         f.own.want(false);
         clicked.performClose(None);
-        turn();
+        turn_until(|| f.closes.get() > 0);
         let now = f.view.window().unwrap();
         assert!(
             f.closes.get() == 0 || std::ptr::eq(&*now, &*clicked),
@@ -352,7 +354,7 @@ mod macos {
             "a click on a replaced window closed the editor"
         );
         second.performClose(None);
-        turn();
+        turn_until(|| f.closes.get() == 1);
         assert_eq!(f.closes.get(), 1);
         close(f);
         println!("own window: a click from a replaced window is dropped");
