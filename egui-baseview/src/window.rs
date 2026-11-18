@@ -789,10 +789,9 @@ fn frame_at(timing: Option<baseview::FrameTiming>, now: Instant) -> Instant {
 /// unseen, since baseview runs no frame then, rather than a stall. Read off
 /// the frame rather than off `Occluded(true)`, which can be lost.
 ///
-/// What this still reads as one gap is the time a view spent hidden in a
-/// visible window, which sends no occlusion event, and a covered window whose
-/// reveal notification was lost, so that the link's first frame ends the gap:
-/// a wrong log line in an app's stall check, accepted.
+/// What this still reads as one gap is a covered window whose reveal
+/// notification was lost, so that the link's first frame ends the gap: a
+/// wrong log line in an app's stall check, accepted.
 #[derive(Default)]
 struct TickGaps {
     last: Option<Instant>,

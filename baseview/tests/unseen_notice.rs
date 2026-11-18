@@ -18,7 +18,7 @@ mod macos {
     use std::sync::Arc;
 
     use baseview::{
-        Event, EventStatus, UnseenNotice, Window, WindowHandler, WindowOpenOptions,
+        Event, EventStatus, UnseenNotice, Window, WindowEvent, WindowHandler, WindowOpenOptions,
     };
     use objc2::rc::{autoreleasepool, Retained};
     use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
@@ -44,6 +44,8 @@ mod macos {
     struct Shared {
         told: AtomicUsize,
         frames: AtomicUsize,
+        /// The last `Occluded` the handler was told: 0 none, 1 seen, 2 not.
+        occluded: AtomicUsize,
         /// The handler is running: a frame or an event.
         handling: AtomicBool,
         /// A notice arrived while it was.
@@ -83,7 +85,10 @@ mod macos {
             self.shared.handling.store(false, Ordering::Relaxed);
         }
 
-        fn on_event(&mut self, window: &mut Window, _: Event) -> EventStatus {
+        fn on_event(&mut self, window: &mut Window, event: Event) -> EventStatus {
+            if let Event::Window(WindowEvent::Occluded(occluded)) = event {
+                self.shared.occluded.store(1 + usize::from(occluded), Ordering::Relaxed);
+            }
             if self.shared.hide_on_event.swap(false, Ordering::Relaxed) {
                 hide(window);
             }
@@ -156,13 +161,24 @@ mod macos {
             assert!(fire(), "a seen view runs frames");
             assert_eq!(told(), 0, "opening seen tells nothing");
 
+            let occluded = || match shared.occluded.load(Ordering::Relaxed) {
+                0 => None,
+                told => Some(told == 2),
+            };
+            let frames = || shared.frames.load(Ordering::Relaxed);
+            assert_eq!(occluded(), Some(false), "opening seen tells the handler");
+
             view.setHidden(true);
             assert_eq!(told(), 1, "the view hidden");
+            assert_eq!(occluded(), Some(true), "a hidden view's handler is not told");
             assert!(!fire(), "a hidden view runs no frame");
             view.setHidden(true);
             assert_eq!(told(), 1, "told again while it stays hidden");
+            let before = frames();
             view.setHidden(false);
             assert_eq!(told(), 1, "a reveal is not told");
+            assert_eq!(occluded(), Some(false), "an un-hidden view's handler is not told");
+            assert_eq!(frames(), before + 1, "no reveal frame at un-hide");
 
             host.setHidden(true);
             assert_eq!(told(), 2, "an ancestor hidden");
@@ -178,16 +194,20 @@ mod macos {
             // A notification lost: the next link callback finds the loss.
             baseview::testing::set_window_shows(Some(true));
             assert!(fire(), "seen again");
+            assert_eq!(occluded(), Some(false), "a gain the link found was not told the handler");
             baseview::testing::set_window_shows(Some(false));
             assert!(!fire(), "occluded, with no notification");
             assert_eq!(told(), 4, "the link callback missed a loss no notification reported");
+            assert_eq!(occluded(), Some(true), "a loss the link found was not told the handler");
 
             baseview::testing::set_window_shows(Some(true));
             assert!(fire(), "seen again");
             view.removeFromSuperview();
             assert_eq!(told(), 5, "the view taken out of its window");
+            assert_eq!(occluded(), Some(true), "a view out of its window was not told the handler");
             host.addSubview(&view);
             assert!(fire(), "seen once back in a window");
+            assert_eq!(occluded(), Some(false), "a view back in a window was not told the handler");
             assert_eq!(told(), 5, "a move back is not told");
 
             shared.hide_in_frame.store(true, Ordering::Relaxed);

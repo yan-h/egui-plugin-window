@@ -43,10 +43,9 @@ Waiting for the callback made that up to a frame interval:
 measured at 11-14 ms under the ~15 ms frame timer the link replaced, and it scales with the frame divisor, so a frame-rate cap makes it worse;
 painting from the notification measures under 1 ms. `trigger_frame` takes the handler borrow fallibly to stay safe against a notification arriving mid-frame (that direction only —
 `trigger_event` still borrows infallibly and documents its panic), and the handler drops a notification repeating the state the view is already in, which would otherwise buy an off-cadence frame for nothing.
-That state is kept per window attachment (#1070):
-`window_visible` is an `Option<bool>`,
-and a `viewDidMoveToWindow` override (a new `ViewImpl` method registered in the two appkit wrapper files) clears it to `None` and samples the new window,
-so a reparented view reports its new window even when both windows read the same.
+Since patch 12 the event is derived from patch 9's test rather than from a reading of its own.
+A `viewDidMoveToWindow` override (a new `ViewImpl` method registered in the two appkit wrapper files) samples the new window,
+so a reparented view reports its new window even when both windows read the same (#1070).
 The view also samples once at open, right after the handler's initial resize event;
 `occlusion_ready` holds the override off until then, because the first `viewDidMoveToWindow` runs during parenting before the handler exists.
 That is what lets a window that opens occluded deliver its reveal.
@@ -125,8 +124,7 @@ Asked of AppKit on every frame rather than kept from patch 3's notification, so 
 a covered window's link still fires on every refresh, so the test is three AppKit calls and nothing more.
 Ahead of the settles because an unseen view has no gesture to settle: what it owes then is paid once it shows, before anything is drawn from it,
 a withheld exit on the first frame and a stuck button on the second, since a release needs two settles to be confirmed.
-Events still reach the handler while the view is unseen, and the first frame once it shows draws what they changed:
-the reveal's (patch 3) for a window back from occlusion, the next link callback once the link resumes for a view un-hidden in a visible window.
+Events still reach the handler while the view is unseen, and the first frame once it shows draws what they changed: the reveal's (patch 3, and since patch 12 for an un-hidden view too).
 It retires patch 4's 10 Hz watchdog and with it patch 1's timer.
 `tests/unseen_frames.rs` (no harness, as `host_keys.rs`) sends `displayLinkFired:` by hand to a view in a window that is not on screen, and to one in no window, and checks that neither runs a frame;
 a frame running for a view that can be seen is tested in `tests/unseen_notice.rs` (patch 11), which sets what the window's occlusion reads as through the `testing` feature, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
@@ -164,6 +162,13 @@ The `testing` feature (native tests only; no plug-in enables it) lets a test set
 `tests/unseen_notice.rs` (no harness, as `host_keys.rs`), which `ci.sh` runs with that feature, checks one call each for the view hidden, an ancestor hidden, the window occluded by notification, the window occluded with the notification lost and the next link callback finding it, and the view taken out of its window;
 none at open, on a reveal, on a move back, for a repeat, or at close;
 and that a loss found inside a frame, inside an event `trigger_event` delivers and inside one `trigger_deferrable_event` delivers is told after each lets go, by a notice that sends the view an event through `trigger_event`, whose infallible borrow would panic inside the handler's.
+- **Patch 12** (`src/platform/macos/view.rs`, `tests/unseen_notice.rs`): one reading of whether the view can be seen (#15).
+`check_seen` asks patch 9's `is_visible` and keeps the answer, `seen`, which patch 11's notice already read;
+the handler's `Occluded` is now told from it, on a change and on every answer for a window just attached to, in place of patch 3's second reading of the window alone (`window_visible`, `report_window_occlusion`).
+A gain runs patch 3's reveal frame where the event that found it asks: the occlusion notification, `viewDidUnhide` and a move to a window.
+So a view hidden inside a visible window is told `Occluded(true)` too, and its renderer hides its layer then and draws the reveal frame at un-hide;
+a frame gate that finds a change a lost notification never reported tells it as well, rather than leaving `Occluded` stale;
+and a view taken out of its window is told `Occluded(true)` as it leaves.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -406,7 +411,8 @@ A frame the link asked for ends a gap and counts it; one it did not ask for coun
 That frame is now the reveal's, run from the occlusion notification, and the gap it would end is the time the window spent unseen, since no frame runs then (baseview patch 9);
 read off the frame rather than off `Occluded(true)`, which can be lost.
 Until baseview's watchdog went, the same rule kept the watchdog's slow frames from reading as stalls.
-The time a view spent hidden in a visible window (no occlusion event), or covered when the reveal's notification was lost, still reads as one gap: a wrong log line, accepted.
+The time a window spent covered when the reveal's notification was lost still reads as one gap, ended by the link's first frame: a wrong log line, accepted.
+A view un-hidden in a visible window runs the reveal's frame too since baseview patch 12, so its time hidden no longer reads as a gap.
 It replaces Patch 21 (#1692, #1707), which slowed the link's divisor to land on the frame the idle poll drew on, and is retired whole with baseview Patch 7:
 `paced_divisor`, `PACE_MARGIN`, `MAX_FRAME_GAP`, `RESIZE_HOLD`, the restore of the chosen divisor on every event and the earliest-deadline keep for undrawn passes all went with it.
 - **Patch 23** (`src/window.rs`, the renderer; from otonal's fork): one owner for a size a surface can be made at.

@@ -82,9 +82,8 @@ pub(crate) struct BaseviewView {
     notification_center_observer: Cell<Option<NotificationCenterObserver>>,
     occlusion_observer: Cell<Option<NotificationCenterObserver>>,
 
-    /// Visibility last delivered for the current window attachment. `None`
-    /// means the view is detached or its new window has not been sampled yet.
-    window_visible: Cell<Option<bool>>,
+    /// Whether the handler exists to be told: the first `viewDidMoveToWindow`
+    /// runs during parenting, before it does.
     occlusion_ready: Cell<bool>,
 
     /// Whom to tell that the view stopped being seen. See `UnseenNotice`.
@@ -126,7 +125,6 @@ impl BaseviewView {
             window_handler: None.into(),
             notification_center_observer: None.into(),
             occlusion_observer: None.into(),
-            window_visible: None.into(),
             occlusion_ready: false.into(),
             unseen_notice,
             seen: false.into(),
@@ -185,13 +183,10 @@ impl BaseviewView {
 
             // The first viewDidMoveToWindow ran during parenting, before the
             // handler existed. Sample only now, after its initial size event;
-            // an occluded first window must be remembered before its reveal.
+            // an unseen first window must be told before its reveal. The
+            // first answer tells the app nothing: `seen` was false.
             view.occlusion_ready.set(true);
-            if let Some(window) = view.view.window() {
-                Self::report_window_occlusion(view, &window, false);
-            }
-            // The first answer, which tells nothing: `seen` was false.
-            Self::check_seen(view);
+            Self::check_seen(view, Sample::Attached { reveal: false });
         });
 
         (view, state)
@@ -281,21 +276,67 @@ impl BaseviewView {
         Self::pay_unseen(this);
     }
 
-    /// Ask `is_visible` again and keep the answer, and tell the app if the
-    /// view has just stopped being seen (`UnseenNotice`). Returns the answer.
+    /// Ask `is_visible` again and keep the answer, the view's one reading of
+    /// whether it can be seen, and tell what changed. Returns the answer.
+    ///
+    /// - The handler is told `Occluded` on a change, and on every answer for
+    ///   a window the view has just attached to, whose renderer state starts
+    ///   afresh.
+    /// - The app is told a loss (`UnseenNotice`).
+    /// - A gain runs the reveal frame at once where `sample` asks for it.
     ///
     /// Called at each event that can change it: the window's occlusion
     /// notification, `viewDidHide` and `viewDidUnhide`, a move to another
     /// window or to none, and the frame gate, which asks on every callback the
     /// frame divisor lets through and so repairs a lost notification, up to
     /// `divisor` refreshes late, while the link fires.
-    fn check_seen(this: ViewRef<Self>) -> bool {
+    fn check_seen(this: ViewRef<Self>, sample: Sample) -> bool {
         let seen = Self::is_visible(this);
+        let was = this.seen.replace(seen);
+        let attached = matches!(sample, Sample::Attached { .. });
         // Not after the window is closed: its own removal from the window is
         // the app's doing, and nothing is left to tell.
-        if this.seen.replace(seen) && !seen && !this.state.closed.get() {
+        if this.state.closed.get() {
+            return seen;
+        }
+        if was != seen || attached {
+            Self::trigger_deferrable_event(this, Event::Window(WindowEvent::Occluded(!seen)));
+        }
+        if was && !seen {
             this.unseen_owed.set(true);
             Self::pay_unseen(this);
+        }
+        let reveal = match sample {
+            Sample::Attached { reveal } => reveal,
+            Sample::Changed { reveal } => reveal && !was,
+        };
+        if seen && reveal {
+            // Seen again, and what is on screen is the drawable from before
+            // it stopped being seen: the compositor keeps showing it until
+            // something presents over it, and nothing presents while the view
+            // is unseen (`trigger_frame` runs no frame for it, and a drawable
+            // would be refused if one ran).
+            //
+            // So the ghost lives exactly as long as it takes to get one frame
+            // out, and the event that reported the change is the earliest
+            // that can happen: for a window, the occlusion state it reports
+            // is the same state the drawable request checks, so no earlier
+            // signal — activation, key window — buys a frame that would be
+            // allowed to present.
+            //
+            // Painting HERE rather than leaving it to the next link callback
+            // is therefore the whole of the fix. The event above marks the
+            // handler for repaint; the callback that would act on it is up to
+            // a frame away, and that wait IS the ghost: measured at 11-14 ms
+            // under the ~15 ms frame timer the link replaced, and it scales
+            // with the frame divisor.
+            //
+            // The dirty mark is for whatever AppKit draws itself, which for a
+            // surface-backed window is nothing; the frame is what puts new
+            // pixels up. It asks `is_visible` again, which answers as this
+            // just did, so it runs.
+            this.view.setNeedsDisplay(true);
+            Self::trigger_frame(this);
         }
         seen
     }
@@ -354,15 +395,14 @@ impl BaseviewView {
         // on every frame rather than kept from the occlusion notification, so
         // it cannot go stale when a notification is lost. Its events still
         // arrive meanwhile, and the first frame once it shows draws what they
-        // changed: the reveal's, run from `report_window_occlusion`, for a
-        // window coming back from occlusion; the next link callback, once the
-        // link resumes, for a view un-hidden in a visible window.
+        // changed: the reveal's, run from `check_seen` by the event that
+        // reports the view seen again.
         //
         // Ahead of the settles as well: an unseen view has no gesture to
         // settle. Whatever is owed then is paid once it shows, before anything
         // is drawn from it: a withheld exit on the first frame, a stuck button
         // on the second, since a release needs two settles to be confirmed.
-        if !Self::check_seen(this) {
+        if !Self::check_seen(this, Sample::Changed { reveal: false }) {
             return;
         }
 
@@ -564,49 +604,7 @@ impl BaseviewView {
             return;
         }
 
-        Self::report_window_occlusion(this, &window, true);
-        Self::check_seen(this);
-    }
-
-    fn report_window_occlusion(this: ViewRef<Self>, window: &NSWindow, paint_visible: bool) {
-        let visible = window_shows(window);
-        // A repeated sample costs a whole off-cadence frame below, so it
-        // stops here. Notifications are per window, not per embedded view;
-        // attachment also samples once even if the new window has the same
-        // visibility as the old one.
-        if this.window_visible.replace(Some(visible)) == Some(visible) {
-            return;
-        }
-        Self::trigger_deferrable_event(this, Event::Window(WindowEvent::Occluded(!visible)));
-
-        if visible && paint_visible {
-            // Re-exposed, and what is on screen is the drawable from before
-            // the window was hidden — the compositor keeps showing it until
-            // something presents over it, and nothing presents while the
-            // window is occluded (`trigger_frame` runs no frame for it, and a
-            // drawable would be refused if one ran).
-            //
-            // So the ghost lives exactly as long as it takes to get one frame
-            // out, and this notification is the earliest that can happen: the
-            // occlusion state it reports is the same state the drawable
-            // request checks, so no earlier signal — activation, key window —
-            // buys a frame that would be allowed to present.
-            //
-            // Painting HERE rather than leaving it to the next link callback
-            // is therefore the whole of the fix. The event above marks the
-            // handler for repaint; the callback that would act on it is up to
-            // a frame away, and that wait IS the ghost: measured at 11-14 ms
-            // under the ~15 ms frame timer the link replaced, and it scales
-            // with the frame divisor.
-            //
-            // The dirty mark is for whatever AppKit draws itself, which for a
-            // surface-backed window is nothing; the frame is what puts new
-            // pixels up. For a view that is not hidden it runs, because
-            // `trigger_frame` asks `window_shows` as this just did; a hidden
-            // one runs no frame here and draws once it is shown.
-            this.view.setNeedsDisplay(true);
-            Self::trigger_frame(this);
-        }
+        Self::check_seen(this, Sample::Changed { reveal: true });
     }
 
     fn fetch_view_size(view: &NSView) -> WindowInfo {
@@ -621,6 +619,17 @@ impl BaseviewView {
             scale_factor,
         )
     }
+}
+
+/// What a call to `check_seen` samples for, and whether a gain runs the
+/// reveal frame at once.
+#[derive(Clone, Copy)]
+enum Sample {
+    /// A possible change of the same attachment.
+    Changed { reveal: bool },
+    /// The view attached to a window, or left one: the handler is told the
+    /// answer whatever it was before.
+    Attached { reveal: bool },
 }
 
 /// Whether any of `window` can be on screen, by its occlusion state: the
@@ -753,25 +762,18 @@ impl ViewImpl for BaseviewView {
     }
 
     fn view_did_move_to_window(this: ViewRef<Self>) {
-        // viewWillMoveToWindow still sees the old `view.window()`. Invalidate
-        // before the superclass can post any notification for the new one.
-        this.window_visible.set(None);
         unsafe {
             let superclass = msg_send![this.view, superclass];
             let () = msg_send![super(this.view, superclass), viewDidMoveToWindow];
         }
 
         // Once AppKit has attached the view, sample the new window even if
-        // both windows report the same visibility.
+        // both windows report the same visibility. A view taken out of its
+        // window, or moved into one not on screen, has stopped being seen.
         if !this.occlusion_ready.get() {
             return;
         }
-        if let Some(window) = this.view.window() {
-            Self::report_window_occlusion(this, &window, true);
-        }
-        // A view taken out of its window, or moved into one not on screen,
-        // has stopped being seen.
-        Self::check_seen(this);
+        Self::check_seen(this, Sample::Attached { reveal: true });
     }
 
     fn view_did_hide(this: ViewRef<Self>) {
@@ -779,7 +781,7 @@ impl ViewImpl for BaseviewView {
             let superclass = msg_send![this.view, superclass];
             let () = msg_send![super(this.view, superclass), viewDidHide];
         }
-        Self::check_seen(this);
+        Self::check_seen(this, Sample::Changed { reveal: false });
     }
 
     fn view_did_unhide(this: ViewRef<Self>) {
@@ -787,7 +789,7 @@ impl ViewImpl for BaseviewView {
             let superclass = msg_send![this.view, superclass];
             let () = msg_send![super(this.view, superclass), viewDidUnhide];
         }
-        Self::check_seen(this);
+        Self::check_seen(this, Sample::Changed { reveal: true });
     }
 
     fn update_tracking_areas(this: ViewRef<Self>) {
