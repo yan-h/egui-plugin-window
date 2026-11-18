@@ -391,9 +391,11 @@ where
     egui_time: f64,
     egui_input: egui::RawInput,
     /// Where the pointer was last seen, which is where a button event happens:
-    /// baseview reports a press and a release without one. `None` only before
-    /// the first move — and it is not cleared when the pointer leaves, because
-    /// a release still lands where the pointer was (see `CursorLeft`).
+    /// baseview reports a press and a release without one, after a move to the
+    /// event's own location. `None` only before the first move — and it is not
+    /// cleared when the pointer leaves, because the release baseview
+    /// synthesises for a button stuck down has no location of its own and
+    /// lands where the pointer was (see `CursorLeft`).
     /// In logical (host) pixels, as baseview reports it, and converted to
     /// points with the zoom of the event that is delivered at it, so a click
     /// right after a zoom change lands where the pointer is.
@@ -1401,11 +1403,11 @@ where
                     // `PointerGone` is egui's business; the last position is
                     // ours, and forgetting it here is how a release goes
                     // missing. A button event is only ever sent with a
-                    // position, so one that arrives after the exit — the
-                    // release of a drag let go outside the window — would be
-                    // dropped, and egui would believe the button is held
-                    // forever: every ScrollArea in the editor refuses the
-                    // wheel while anything at all is being dragged.
+                    // position, and the release baseview synthesises for a
+                    // button stuck down comes with no move ahead of it; after
+                    // the exit it would be dropped, and egui would believe the
+                    // button is held forever: every ScrollArea in the editor
+                    // refuses the wheel while anything at all is being dragged.
                     self.egui_input.events.push(egui::Event::PointerGone);
                 }
                 _ => {}
@@ -1679,6 +1681,8 @@ fn update_focus_input(
         baseview::WindowEvent::Unfocused => false,
         _ => return,
     };
+    // Both on purpose, neither a duplicate of the other: harmonigraph ends a
+    // gesture on the focus-lost event, and egui reads the flag.
     input.focused = focused;
     input.events.push(egui::Event::WindowFocused(focused));
     if let Some(viewport) = input.viewports.get_mut(&viewport_id) {

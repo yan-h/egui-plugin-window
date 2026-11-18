@@ -51,6 +51,11 @@ path = "tests/host_keys.rs"
 harness = false
 
 [[test]]
+name = "press_location"
+path = "tests/press_location.rs"
+harness = false
+
+[[test]]
 name = "unseen_frames"
 path = "tests/unseen_frames.rs"
 harness = false

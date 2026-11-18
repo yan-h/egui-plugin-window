@@ -413,6 +413,7 @@ impl BaseviewView {
     /// Report a press, and record the release it now owes the handler.
     fn report_press(this: ViewRef<Self>, button: MouseButton, event: &NSEvent) {
         this.buttons_reported_down.set(this.buttons_reported_down.get() | button_bit(button));
+        Self::report_location(this, event);
         Self::trigger_event(
             this,
             Event::Mouse(ButtonPressed {
@@ -433,6 +434,7 @@ impl BaseviewView {
         let owed = this.buttons_reported_down.get();
         if owed & button_bit(button) != 0 {
             this.buttons_reported_down.set(owed & !button_bit(button));
+            Self::report_location(this, event);
             Self::trigger_event(
                 this,
                 Event::Mouse(ButtonReleased {
@@ -444,6 +446,38 @@ impl BaseviewView {
         // After the release, never before it: the gesture ends where the
         // pointer still is, and only then is the pointer gone.
         Self::settle_pointer_exit(this);
+    }
+
+    /// Report the event's own location: every move and drag, and a press or a
+    /// release ahead of the button.
+    ///
+    /// A button event carries no position, so a consumer puts it where it last
+    /// saw the pointer, and that can be stale: `mouseMoved:` arrives only while
+    /// the app is active (`ActiveInActiveApp`), and egui-baseview keeps the
+    /// last position across `CursorLeft`. A click into the editor from another
+    /// app (`acceptsFirstMouse:` says yes) would otherwise land on whatever
+    /// was under the pointer when it last left.
+    ///
+    /// Not gated on the view's bounds, unlike the wheel's: a press reaches the
+    /// view only inside it, and a release outside it is the end of a drag out
+    /// of the window, which must end where the pointer is, as every
+    /// `mouseDragged:` before it already reported. A gate would put that
+    /// release back at the last position seen inside. Sent only with a release
+    /// that is reported: a `mouseUp:` `report_release` drops can arrive after
+    /// the exit was paid, and a move then would bring back a pointer the
+    /// consumer was told is gone.
+    ///
+    /// The release `settle_stuck_buttons` synthesises has no event, and so no
+    /// location: it still lands at the consumer's last known position.
+    fn report_location(this: ViewRef<Self>, event: &NSEvent) {
+        let point = this.view.convertPoint_fromView(event.locationInWindow(), None);
+        Self::trigger_event(
+            this,
+            Event::Mouse(MouseEvent::CursorMoved {
+                position: Point { x: point.x, y: point.y },
+                modifiers: make_modifiers(event.modifierFlags()),
+            }),
+        );
     }
 
     fn send_deferred_events(this: ViewRef<Self>, window_handler: &mut dyn WindowHandler) {
@@ -702,17 +736,7 @@ impl ViewImpl for BaseviewView {
     }
 
     fn mouse_moved(this: ViewRef<Self>, event: &NSEvent) {
-        let point = this.view.convertPoint_fromView(event.locationInWindow(), None);
-
-        let position = Point { x: point.x, y: point.y };
-
-        Self::trigger_event(
-            this,
-            Event::Mouse(MouseEvent::CursorMoved {
-                position,
-                modifiers: make_modifiers(event.modifierFlags()),
-            }),
-        );
+        Self::report_location(this, event);
     }
 
     fn scroll_wheel(this: ViewRef<Self>, event: &NSEvent) {

@@ -129,6 +129,18 @@ It retires patch 4's 10 Hz watchdog and with it patch 1's timer.
 `tests/unseen_frames.rs` (no harness, as `host_keys.rs`) sends `displayLinkFired:` by hand to a view in a window that is not on screen, and to one in no window, and checks that neither runs a frame;
 a frame running for a view that can be seen is not tested, since a window reads as visible only once the window server says so, later and not reliably on a CI runner.
 macOS only.
+- **Patch 10** (`src/platform/macos/view.rs`, `tests/press_location.rs`, `Cargo.toml`): report where a press or a release happened before the button.
+A button event carries no position, so the consumer puts it where it last saw the pointer, and that can be stale:
+`mouseMoved:` arrives only while the app is active (`ActiveInActiveApp`), and egui-baseview keeps the last position across `CursorLeft` (its Patch 11).
+A click into the editor from another app (`acceptsFirstMouse:` says yes) landed on whatever was under the pointer when it last left.
+Now `mouseDown:`, `mouseUp:` and their right and other counterparts send a `CursorMoved` at the event's own location, with its modifiers, ahead of the button, as the wheel does.
+Not gated on the view's bounds as the wheel's is:
+a press reaches the view only inside it, and a release outside it ends a drag out of the window, which must end where the pointer is, as every `mouseDragged:` already reports.
+Sent only with a release that is reported, so a `mouseUp:` dropped as already paid cannot bring back a pointer whose exit was paid.
+Patch 6's synthesised release has no event, and still lands at the consumer's last position;
+patch 5's withheld exit and its order, release then exit, are unchanged.
+`tests/press_location.rs` (no harness, as `host_keys.rs`) sends a mouse-down and a mouse-up outside the view, with no move before either, and checks a move to each location precedes its button.
+macOS only.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -137,7 +149,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see, the withheld pointer exit, a press and a release at their own location, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -255,9 +267,11 @@ Costs a main-thread wait per present, so it is not left on.
 the pointer leaves.
 A press and a release are the two baseview events that carry no position of their own, so both are sent at the pointer's last position (`pointer_position`) —
 and both are DROPPED when it is `None`, which `CursorLeft` set.
-The release of a drag let go outside the window was therefore thrown away here, and egui, which deliberately keeps a drag alive across `PointerGone`, believed the button was held forever:
+baseview's Patch 10 now sends a move to the event's own location ahead of every real press and release, so those always find a fresh position;
+the release baseview's Patch 6 synthesises for a stuck button has no event and no move, and is the one still delivered at the last position, after the exit as often as not.
+Such a release thrown away here left egui, which deliberately keeps a drag alive across `PointerGone`, believing the button was held forever:
 every `ScrollArea` in the editor refuses the wheel while anything at all is being dragged (`end_stranded_drag` in `harmonigraph-ui` is the shell-side backstop for it).
-The position is the pointer's last known one, which is where a release lands;
+The position is the pointer's last known one, which is where that release lands;
 `None` now means only that the pointer has never been seen, which is the case the guard is for.
 - **Patch 12** (`src/renderer/wgpu/renderer.rs`, `src/window.rs`):
 the same layer as Patch 10, across the other discontinuity —
