@@ -1,0 +1,58 @@
+[package]
+name = "plugin-own-window"
+version = "0.1.0"
+edition = "2024"
+description = "A plug-in editor's view moved out of the host's window into one of its own, and back, on macOS."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[test]]
+name = "own_window"
+path = "tests/own_window.rs"
+harness = false
+
+[[test]]
+name = "host_keys"
+path = "tests/host_keys.rs"
+harness = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSProcessInfo",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The host-key test opens a real baseview view and moves it with this crate.
+baseview = { path = "../baseview" }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSDate",
+    "NSRunLoop",
+    "NSUserDefaults",
+] }
+raw-window-handle = "0.5"

@@ -15,13 +15,18 @@ platform but macOS opens a window, and no host but Bitwig is tested.
   from the view's display link, and its mouse, key and window events.
 - `egui-baseview/`: egui on that view. It decides whether a frame runs the UI,
   translates input, and renders with wgpu.
+- `plugin-own-window/`: the editor's own window. It moves the editor's view
+  out of the host's window into one of its own, so the editor stays on
+  screen while another app is in front, and back. It depends on AppKit
+  alone, through the objc2 crates, not on the other two.
 
-Both began as crates.io releases (`baseview` 0.1.4, `egui-baseview` 0.3.0,
+The first two began as crates.io releases (`baseview` 0.1.4, `egui-baseview` 0.3.0,
 MIT OR Apache-2.0, licenses in each directory) and are no longer reconciled
 with upstream. They keep those crate names so that a project's
 `[patch.crates-io]` selects them. `PATCHES.md` records what each changes from
-its release. Off macOS, `baseview` is a stub that opens no window, so a
-project's headless tests build on Linux.
+its release, and where `plugin-own-window`, which has no upstream, came from.
+Off macOS, `baseview` and `plugin-own-window` are stubs that open no window,
+so a project's headless tests build on Linux.
 
 ## Using it from a project
 
@@ -33,7 +38,15 @@ baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit
 egui-baseview = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
 ```
 
-A change here reaches a project when that project moves its pin, in a pull
+`plugin-own-window` is no crates.io crate, so it is a plain git dependency of
+the crate that opens the editor, at the same commit:
+
+```toml
+[dependencies]
+plugin-own-window = { git = "https://github.com/yan-h/egui-plugin-window", rev = "<commit>" }
+```
+
+A change here reaches a project when that project moves its pins, in a pull
 request of its own.
 
 ## Tests
@@ -42,6 +55,7 @@ request of its own.
 ./ci.sh
 ```
 
-On macOS it runs both crates' tests; elsewhere it checks that they build.
+On macOS it runs the three crates' tests; elsewhere it checks that they
+build. `plugin-own-window` is also held to rustfmt and clippy.
 The `frame-log` feature of `egui-baseview` builds only against
 harmonigraph's patched wgpu-hal, so harmonigraph's CI builds it, not this one.
