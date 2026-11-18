@@ -59,6 +59,11 @@ pub unsafe fn create_view_class<V: ViewImpl>() -> &'static AnyClass {
             sel!(viewDidMoveToWindow),
             view_did_move_to_window::<V> as extern "C-unwind" fn(_, _),
         );
+        class.add_method(sel!(viewDidHide), view_did_hide::<V> as extern "C-unwind" fn(_, _));
+        class.add_method(
+            sel!(viewDidUnhide),
+            view_did_unhide::<V> as extern "C-unwind" fn(_, _),
+        );
         class.add_method(
             sel!(displayLinkFired:),
             display_link_fired::<V> as extern "C-unwind" fn(_, _, _),
@@ -201,6 +206,14 @@ extern "C-unwind" fn view_will_move_to_window<V: ViewImpl>(
 
 extern "C-unwind" fn view_did_move_to_window<V: ViewImpl>(this: &View<V>, _self: Sel) {
     V::view_did_move_to_window(this.inner_ref());
+}
+
+extern "C-unwind" fn view_did_hide<V: ViewImpl>(this: &View<V>, _self: Sel) {
+    V::view_did_hide(this.inner_ref());
+}
+
+extern "C-unwind" fn view_did_unhide<V: ViewImpl>(this: &View<V>, _self: Sel) {
+    V::view_did_unhide(this.inner_ref());
 }
 
 extern "C-unwind" fn display_link_fired<V: ViewImpl>(

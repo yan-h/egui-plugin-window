@@ -131,6 +131,8 @@ pub trait ViewImpl: Sized {
     fn view_did_change_backing_properties(this: ViewRef<Self>);
     fn view_will_move_to_window(this: ViewRef<Self>, new_window: Option<&NSWindow>);
     fn view_did_move_to_window(this: ViewRef<Self>);
+    fn view_did_hide(this: ViewRef<Self>);
+    fn view_did_unhide(this: ViewRef<Self>);
     fn display_link_fired(this: ViewRef<Self>, link: &CADisplayLink);
     fn update_tracking_areas(this: ViewRef<Self>);
     fn reset_cursor_rects(this: ViewRef<Self>);

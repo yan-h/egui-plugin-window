@@ -61,6 +61,27 @@ pub use window_open_options::*;
 
 pub(crate) mod wrappers;
 
+/// For native tests only (the `testing` feature): a window reads as visible
+/// only once the window server says so, which a test process may never see,
+/// so a test sets what every window's occlusion state reads as instead. The
+/// rest of the check, the view and its ancestors hidden and the view in a
+/// window at all, stays AppKit's.
+#[cfg(all(feature = "testing", target_os = "macos"))]
+#[doc(hidden)]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static WINDOW_SHOWS: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// Read every window on this thread as visible or not, or as AppKit says
+    /// with `None`. An occlusion notification is not sent by this.
+    pub fn set_window_shows(shows: Option<bool>) {
+        WINDOW_SHOWS.with(|cell| cell.set(shows));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FrameTiming;
