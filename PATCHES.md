@@ -442,20 +442,27 @@ otonal's was ported from harmonigraph's at harmonigraph `b154fe82`; which side e
 - **From harmonigraph's**: one object per open editor, owned by the editor handle, with weak references elsewhere and its cleanup on drop;
 the main-thread rule held by `dispatch2::MainThreadBound` rather than a `Mutex` and `unsafe impl Send`;
 the latch that tells the host of a close click once;
-no close button where there is no host to tell.
-- **From otonal's**: the minimum and maximum size given by the shell at every frame (`take_size`'s `Limits`), where harmonigraph's had a fixed minimum;
-`is_out`, for a host `set_size` arriving while the view is out, where harmonigraph kept a flag in its saved state;
+no close button where there is no host to tell;
+the minimum set on the window before its remembered frame is restored, so a remembered frame smaller than it is widened.
+- **From otonal's**: the minimum and maximum size given by the shell (at `open`, then at every frame through `take_size`'s `Limits`), where harmonigraph's had a fixed minimum;
+`is_out`, for a host `set_size` arriving while the view is out;
 a move out before a pending dock was seen owes the host no resize;
-a pending look for an app's windows called off at a dock.
+a pending look for an app's windows called off at a dock;
+a resize the plug-in asks for keeps the window's top-left corner, computed in one frame update.
+AppKit's own `setContentSize:` kept the top-left too where measured (this repository's tests, macOS 26 and 27), but nothing documents it,
+so for harmonigraph, whose copy left it to AppKit, this is very likely no visible change.
 - **In neither**:
-  - The agent's Objective-C class is built at run time under a process-unique name. Both plug-ins link this crate into one host process, whose class names are shared:
-  a class `define_class!` names at compile time would be registered by the first plug-in to load and used by the other with the first one's code and instance layout.
-  - One `moved` flag reports the size after a move either way: `Docked` after a dock, `Resized` with the window's size after a move out.
-  harmonigraph's copy instead cleared a pending host resize and stored the editor's size in its saved state as the view moved out; its adapter does both on that `Resized`.
-  - A close click is dropped when the view has been docked since, by the window it belongs to being gone, rather than by a dock cancelling it as well:
-  every move after `open` is a perform queued behind the click's, so no window opens again before it runs.
+  - The agent's Objective-C class is built at run time under a process-unique name. Both plug-ins link this crate into one host process, whose class names are shared.
+  objc2 0.6.4's `define_class!` names a class `module_path!()::Name` plus the crate version, and when a class of that auto-generated name already exists it does not panic:
+  `define_class` in `src/__macro_helpers/define_class.rs` takes the `else` branch of `ClassBuilder::new` and returns `AnyClass::get(c_name)` ("we assume that the existing class is the one that we want", lines 248-297; it panics only for a name given with `#[name = ...]`).
+  The second plug-in would then use the first one's class, with the first build's methods and instance layout.
+  - The shell is told of each move synchronously, before the view moves (`Move::Out` with the window's content size, and `Move::Back` at a dock or a close while out), so what it keeps of the editor's size, a save's among it, is right without waiting for a frame, which does not run while the editor cannot be seen.
+  harmonigraph's copy wrote its saved state from inside `pop` and `dock`; otonal's told its shell nothing until the next frame.
+  - A deferred close carries the window clicked and is told only while that window is still the editor's; and a move withdrawn by `want` has its queued `apply:` cancelled, so at most one is queued.
+  Harmonigraph's copy cancelled a pending close at a dock; otonal's did neither, and left a withdrawn `apply:` queued in both.
+  A click queued before a dock is honoured; one queued behind a pending dock is dropped.
+  - `resize` returns the content size AppKit applied, for the editor to take, rather than a success flag.
   - No size is set between `setFrameUsingName:` and `setFrameAutosaveName:`: naming the frame restores a remembered one again (measured), so both copies' `setContentSize:` there was undone,
-  and their own window has reopened as large as it last was, the editor taking that size at its next frame. That is kept, and the comment saying otherwise is gone.
-  - A resize the plug-in asks for is plain `setContentSize:`, which keeps the window's top-left corner (measured on macOS 27; tested here); otonal's copy set the corner again by hand.
+  and their own window has reopened as large as it last was, within the limits, the editor taking that size at its next frame. That is kept, and the comment saying otherwise is gone.
   - It takes the two views as raw `NSView` pointers rather than either shell's window-handle types, so it depends on neither shell nor on `raw-window-handle`.
-- **Tests**: `tests/own_window.rs` (the moves, the close latch, a drop with calls pending, the resize's corner, the limits) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).
+- **Tests**: `tests/own_window.rs` (the moves and their notices, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, a reopen over a remembered frame) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).

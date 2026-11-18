@@ -12,6 +12,9 @@ egui_features=(--no-default-features --features wgpu,tracing)
 # plugin-own-window has no upstream formatting to keep, so it is held to
 # rustfmt and clippy; the two forks are not yet.
 cargo fmt --check -p plugin-own-window
+# The library alone, as a plug-in builds it: the tests' dev-dependencies turn
+# on objc2 features the library would otherwise lack.
+cargo check --locked --lib -p plugin-own-window
 cargo clippy --locked --all-targets --no-deps -p plugin-own-window -- -D warnings
 
 if [[ "$(uname)" == "Darwin" ]]; then

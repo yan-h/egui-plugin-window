@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::{Limits, OwnSize};
+use crate::{Limits, Move, OwnSize};
 
 /// Off macOS the editor stays in the host's window: the hosts there have not
 /// been seen hiding their plug-in windows, and nothing here has been tried on
@@ -21,7 +21,9 @@ impl OwnWindow {
         _host: *mut c_void,
         _view: *mut c_void,
         _out: bool,
+        _limits: Limits,
         _closed: Option<Box<dyn Fn() -> bool>>,
+        _moving: Box<dyn Fn(Move)>,
     ) {
     }
 
@@ -35,8 +37,8 @@ impl OwnWindow {
         None
     }
 
-    pub fn resize(&self, _size: (u32, u32)) -> bool {
-        false
+    pub fn resize(&self, _size: (u32, u32)) -> Option<(u32, u32)> {
+        None
     }
 
     pub fn is_out(&self) -> bool {

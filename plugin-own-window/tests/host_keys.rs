@@ -23,7 +23,7 @@ mod macos {
         NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults};
-    use plugin_own_window::OwnWindow;
+    use plugin_own_window::{Limits, OwnWindow};
     use raw_window_handle::{AppKitWindowHandle, HasRawWindowHandle, RawWindowHandle};
 
     define_class!(
@@ -120,6 +120,8 @@ mod macos {
         }
     }
 
+    const NAME: &str = "plugin-own-window host keys test";
+
     fn turn() {
         NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
     }
@@ -156,10 +158,21 @@ mod macos {
                 unreachable!()
             };
             let view = unsafe { Retained::retain(raw.ns_view.cast::<NSView>()).unwrap() };
-            const NAME: &str = "plugin-own-window host keys test";
             let own = OwnWindow::new(NAME);
             // SAFETY: both views are alive.
-            unsafe { own.open(host_ptr, raw.ns_view, false, None) };
+            unsafe {
+                own.open(
+                    host_ptr,
+                    raw.ns_view,
+                    false,
+                    Limits {
+                        min: (50, 50),
+                        max: (1000, 1000),
+                    },
+                    None,
+                    Box::new(|_| {}),
+                )
+            };
             for (mode, out) in [("own window", true), ("redocked", false)] {
                 own.want(out);
                 turn();
@@ -179,9 +192,13 @@ mod macos {
             own.close();
             handle.close();
             host_window.close();
+            println!("host keys through the own window: own window and redocked passed");
+        });
+        // Once every window is gone, which saves its frame again as it goes.
+        autoreleasepool(|_| {
+            turn();
             let key = NSString::from_str(&format!("NSWindow Frame {NAME}"));
             NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
-            println!("host keys through the own window: own window and redocked passed");
         });
     }
 }

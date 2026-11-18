@@ -44,10 +44,19 @@
 //! while AppKit is still closing it. Without a callback the window has no
 //! close button; with one that reports failure, the window is minimized.
 //!
+//! A click is told only while the window clicked is still the editor's when
+//! the telling runs. So a click queued before a dock is honoured, the
+//! player's last act having been the close: the host is told, and the dock
+//! never happens. A click queued behind a pending dock is dropped: by the
+//! time it runs, its window is gone, and the docked editor stays open. At
+//! most one move is queued at a time, so no window opens again between a
+//! click and its telling.
+//!
 //! The view's size is the plug-in's size source's to set, as for a host
 //! resize: the size source asks [`OwnWindow::take_size`] first, at the top of
 //! the frame it will be laid out in, and hands a size the editor asks for to
-//! [`OwnWindow::resize`] before the host. Every call here is on the main
+//! [`OwnWindow::resize`] before the host. Each move is told to the shell as
+//! it happens ([`Move`]), before the view moves. Every call here is on the main
 //! thread, where egui-baseview runs its size source and its frames and where
 //! a CLAP host creates and destroys the editor; one from any other thread
 //! panics.
@@ -81,10 +90,27 @@ pub struct Limits {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnSize {
     /// The view is in its own window, which is this size: the editor takes
-    /// it. Reported once after each move into the window and after each
-    /// change, whoever made it.
+    /// it. Reported when the window's size differs from the one the editor
+    /// last had from it: after the player resizes it, or after a move out
+    /// into a remembered frame of another size. A size the editor asked for
+    /// through [`OwnWindow::resize`] is returned there, not reported again.
     Resized((u32, u32)),
     /// The view is back in the host's window, which the plug-in asks for the
     /// editor's size, as for a resize the editor asks for itself.
     Docked,
+}
+
+/// A move of the editor's view, told to the shell as it happens
+/// ([`OwnWindow::open`]'s `moving`), before the view moves, so that what
+/// the shell keeps of the editor's size, a save's among it, is right at once
+/// rather than at the next frame, which does not come while the editor
+/// cannot be seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    /// Into its own window, whose content is this size, in logical points:
+    /// from now on the editor's size is the window's, and a host `set_size`
+    /// sizes the host's empty window.
+    Out((u32, u32)),
+    /// Out of its own window: docked in the host's, or the editor closing.
+    Back,
 }

@@ -18,7 +18,7 @@ use objc2_foundation::{
     NSArray, NSDictionary, NSNumber, NSObject, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
 };
 
-use crate::{Limits, OwnSize};
+use crate::{Limits, Move, OwnSize};
 
 /// The level Bitwig gives its plug-in windows, measured (CG layer 3), and
 /// `kCGFloatingWindowLevel`: above the host's own windows.
@@ -55,17 +55,25 @@ struct State {
     agent: Option<Retained<AnyObject>>,
     /// Whom the close button tells; without it the window has none.
     closed: Option<Rc<dyn Fn() -> bool>>,
+    /// Whom each move is told, before the view moves.
+    moving: Option<Rc<dyn Fn(Move)>>,
+    /// The sizes the shell allows, as last given: the window takes them
+    /// before its remembered frame is restored, which they bound, and the
+    /// window does not exist when the size source gives them.
+    limits: Option<Limits>,
     /// The editor's own window, from just before the view moves into it to
     /// just before it moves out.
     window: Option<Retained<NSWindow>>,
     /// The content size the editor last had from this window, in logical
-    /// points: reported to the size source, or asked for by the editor.
+    /// points: the view's as it moved in, reported to the size source since,
+    /// or applied for the editor's own ask.
     /// Kept rather than read back from the view, which the editor may size
     /// otherwise (egui-baseview fits a size to the GPU's texture limit): a
     /// mismatch read every frame would report, and run a pass, every frame.
     size: (u32, u32),
-    /// Moved since the size source last asked: it reports where to.
-    moved: bool,
+    /// Docked since the size source last asked, which asks the host for the
+    /// editor's size. A move out before it asked undoes it.
+    redocked: bool,
     /// A move asked for and not yet performed: out if true.
     wanted: Option<bool>,
     /// An app that came forward and has not yet raised its windows, and
@@ -91,6 +99,16 @@ fn logical(size: NSSize) -> (u32, u32) {
 
 fn ns_size((width, height): (u32, u32)) -> NSSize {
     NSSize::new(f64::from(width), f64::from(height))
+}
+
+fn as_object(window: &NSWindow) -> &AnyObject {
+    window.as_ref()
+}
+
+/// The shell's limits, as the bounds of the player's resizing.
+fn set_limits(window: &NSWindow, limits: Limits) {
+    window.setContentMinSize(ns_size(limits.min));
+    window.setContentMaxSize(ns_size(limits.max));
 }
 
 fn top_left(window: &NSWindow) -> NSPoint {
@@ -257,7 +275,9 @@ impl OwnWindow {
         host: *mut c_void,
         view: *mut c_void,
         out: bool,
+        limits: Limits,
         closed: Option<Box<dyn Fn() -> bool>>,
+        moving: Box<dyn Fn(Move)>,
     ) {
         let mtm = main_thread();
         // SAFETY: as the caller promises.
@@ -283,6 +303,8 @@ impl OwnWindow {
             view: Some(view),
             agent: Some(agent),
             closed: closed.map(Rc::from),
+            moving: Some(Rc::from(moving)),
+            limits: Some(limits),
             ..State::default()
         };
         if out {
@@ -307,21 +329,30 @@ impl OwnWindow {
     /// the run loop's next turn if it is not there already: asked from a
     /// frame, which is no place to move it (see the crate documentation).
     pub fn want(&self, out: bool) {
-        let agent = {
+        let (agent, withdrawn) = {
             let mut state = self.state().borrow_mut();
             if state.window.is_some() == out {
-                // There already, which also calls off a move the other way
-                // that has not happened yet.
-                state.wanted = None;
-                return;
+                // There already, which calls off a move the other way that
+                // has not happened yet.
+                if state.wanted.take().is_none() {
+                    return;
+                }
+                (state.agent.clone(), true)
+            } else {
+                if state.wanted.replace(out).is_some() {
+                    return;
+                }
+                (state.agent.clone(), false)
             }
-            if state.wanted.replace(out).is_some() {
-                return;
-            }
-            state.agent.clone()
         };
-        if let Some(agent) = agent {
-            Agent::perform(&agent, sel!(apply:), 0.0);
+        let Some(agent) = agent else { return };
+        // At most one `apply:` is ever queued: one left behind by a withdrawn
+        // move would perform a move asked for after it, ahead of whatever was
+        // queued in between, a close click among them.
+        if withdrawn {
+            Agent::cancel(&agent, sel!(apply:), None);
+        } else {
+            Agent::perform(&agent, sel!(apply:), None, 0.0);
         }
     }
 
@@ -333,47 +364,49 @@ impl OwnWindow {
     /// the editor opened, and where the own window's limits follow the
     /// shell's.
     pub fn take_size(&self, limits: Limits) -> Option<OwnSize> {
-        let (window, host, moved) = {
+        let (window, host, changed) = {
             let mut state = self.state().borrow_mut();
-            let moved = std::mem::take(&mut state.moved);
+            let changed = state.limits.replace(limits) != Some(limits);
             let Some(window) = state.window.clone() else {
-                return moved.then_some(OwnSize::Docked);
+                return std::mem::take(&mut state.redocked).then_some(OwnSize::Docked);
             };
-            (window, state.host.clone(), moved)
+            (window, state.host.clone(), changed)
         };
         if let Some(host_window) = host.and_then(|host| host.window()) {
             conceal(&host_window);
         }
-        let (min, max) = (ns_size(limits.min), ns_size(limits.max));
-        if window.contentMinSize() != min || window.contentMaxSize() != max {
-            window.setContentMinSize(min);
-            window.setContentMaxSize(max);
+        if changed {
+            set_limits(&window, limits);
         }
         let size = logical(window.contentView()?.frame().size);
         let mut state = self.state().borrow_mut();
-        (moved || size != state.size).then(|| {
+        (size != state.size).then(|| {
             state.size = size;
             OwnSize::Resized(size)
         })
     }
 
     /// A size the editor asked for itself (a pane folding sideways, a
-    /// restore), given to its own window instead of to the host, which keeps
-    /// its top-left corner. Returns whether it was.
-    pub fn resize(&self, size: (u32, u32)) -> bool {
-        let window = {
-            let mut state = self.state().borrow_mut();
-            let Some(window) = state.window.clone() else {
-                return false;
-            };
-            state.size = size;
-            window
-        };
-        // AppKit keeps the window's top-left corner as its content resizes
-        // (measured on macOS 27, and held by this crate's tests), as a host's
-        // window grows, so the title bar stays where it was.
-        window.setContentSize(ns_size(size));
-        true
+    /// restore), given to its own window instead of to the host, from the
+    /// window's top-left corner. Returns the content size AppKit applied,
+    /// which the editor takes, or `None` while the view is in the host's
+    /// window.
+    pub fn resize(&self, size: (u32, u32)) -> Option<(u32, u32)> {
+        let window = self.state().borrow().window.clone()?;
+        // The frame computed whole, keeping the top-left corner, as a host's
+        // window grows, so the title bar stays where it was. AppKit's
+        // `setContentSize:` kept it too where measured (macOS 26 and 27), but
+        // nothing documents which corner it keeps.
+        let frame = window.frame();
+        let mut resized = window.frameRectForContentRect(NSRect::new(NSPoint::ZERO, ns_size(size)));
+        resized.origin = NSPoint::new(
+            frame.origin.x,
+            frame.origin.y + frame.size.height - resized.size.height,
+        );
+        window.setFrame_display(resized, true);
+        let applied = logical(window.contentRectForFrameRect(window.frame()).size);
+        self.state().borrow_mut().size = applied;
+        Some(applied)
     }
 
     /// The editor closing, called before baseview closes the view, which
@@ -397,7 +430,7 @@ impl OwnWindow {
     }
 
     fn pop(&self, mtm: MainThreadMarker) {
-        let (host, view, agent, closable) = {
+        let (host, view, agent, closable, limits, moving) = {
             let state = self.state().borrow();
             let (None, Some(host), Some(view), Some(agent)) =
                 (&state.window, &state.host, &state.view, &state.agent)
@@ -409,6 +442,8 @@ impl OwnWindow {
                 view.clone(),
                 agent.clone(),
                 state.closed.is_some(),
+                state.limits,
+                state.moving.clone(),
             )
         };
 
@@ -452,11 +487,16 @@ impl OwnWindow {
             FLOATING
         });
 
-        // Where it was last time, and as large: the editor takes the window's
-        // size at its next frame ([`OwnSize::Resized`]). The first time, at
-        // the editor's size, where the host's window is. Naming the frame
-        // restores a remembered one too (measured), so a size set between
-        // the two would be undone.
+        // Before the remembered frame is restored, which they bound: one
+        // restored first keeps a size outside them.
+        if let Some(limits) = limits {
+            set_limits(&own, limits);
+        }
+        // Where it was last time, and as large, within the limits: the
+        // editor takes the window's size at its next frame
+        // ([`OwnSize::Resized`]). The first time, at the editor's size, where
+        // the host's window is. Naming the frame restores a remembered one
+        // too (measured), so a size set between the two would be undone.
         if !own.setFrameUsingName(name) {
             match host.window() {
                 Some(host_window) => own.setFrameTopLeftPoint(top_left(&host_window)),
@@ -470,15 +510,23 @@ impl OwnWindow {
         let Some(own_content) = own.contentView() else {
             return;
         };
+        // The shell first, with no borrow held: from here the editor's size
+        // is this window's, which a save must find at once rather than at the
+        // next frame, since none runs while the editor cannot be seen.
+        if let Some(moving) = moving {
+            moving(Move::Out(logical(own_content.frame().size)));
+        }
         // Out from here, before the view moves: attaching it can draw a frame
-        // on the spot, whose size source must find it out and take this
-        // window's size rather than the host's, and a host `set_size` arriving
-        // from now on is not the editor's. A dock no frame has seen yet is
-        // undone, and owes the host nothing.
+        // on the spot, whose size source must find it out, and a host
+        // `set_size` arriving from now on is not the editor's. The view's
+        // size is what the editor has; a remembered frame of another size is
+        // reported at the next frame. A dock no frame has seen yet is undone,
+        // and owes the host nothing.
         {
             let mut state = self.state().borrow_mut();
             state.window = Some(own.clone());
-            state.moved = true;
+            state.size = logical(view.frame().size);
+            state.redocked = false;
         }
         // The move. Made without a state borrow, as every native call here
         // is: the frame drawn on the spot borrows the state.
@@ -495,17 +543,25 @@ impl OwnWindow {
     /// The view keeps its size; the size source asks the host for the same
     /// ([`OwnSize::Docked`]).
     fn dock(&self) {
-        let (window, host, view) = {
+        let (window, host, view, moving) = {
             let mut state = self.state().borrow_mut();
             let Some(window) = state.window.take() else {
                 return;
             };
             // Before the move, which can draw a frame on the spot: that
             // frame's size source must already find it docked.
-            state.moved = true;
+            state.redocked = true;
             state.settling = None;
-            (window, state.host.clone(), state.view.clone())
+            (
+                window,
+                state.host.clone(),
+                state.view.clone(),
+                state.moving.clone(),
+            )
         };
+        if let Some(moving) = moving {
+            moving(Move::Back);
+        }
         // SAFETY: clearing the delegate this window was given.
         let () = unsafe { msg_send![&*window, setDelegate: None::<&AnyObject>] };
         if let (Some(host), Some(view)) = (host, view) {
@@ -522,18 +578,21 @@ impl OwnWindow {
     /// The close button, deferred from the window's asking: the host is told
     /// once for this editor, even when destruction comes on a later turn. No
     /// state borrow is held across the call, which may run [`Self::close`].
-    fn ask_host_close(&self) {
+    fn ask_host_close(&self, clicked: Option<&AnyObject>) {
         let (closed, window) = {
             let mut state = self.state().borrow_mut();
             if state.closing {
                 return;
             }
-            // A click belongs to the window it was made in: docked since, the
-            // editor stays open. No window opens again before this runs, since
-            // every move after `open` is a perform queued behind it.
+            // A click belongs to the window it was made in, which must still
+            // be the editor's: docked since, or in a window opened since, the
+            // editor stays open.
             let (Some(closed), Some(window)) = (state.closed.clone(), state.window.clone()) else {
                 return;
             };
+            if !clicked.is_some_and(|clicked| std::ptr::eq(clicked, as_object(&window))) {
+                return;
+            }
             state.closing = true;
             (closed, window)
         };
@@ -627,10 +686,13 @@ impl Local {
         // Out of the borrow before native calls, which may reenter a size
         // source or frame. Those find the empty state.
         let state = std::mem::take(&mut *self.state.borrow_mut());
+        if let (Some(_), Some(moving)) = (&state.window, &state.moving) {
+            moving(Move::Back);
+        }
         if let Some(agent) = &state.agent {
             // Every deferred move, close and look: none is owed to an editor
             // that has closed.
-            Agent::cancel(agent, None);
+            Agent::cancel_all(agent);
             // SAFETY: removing an observer this added, still alive.
             unsafe {
                 NSWorkspace::sharedWorkspace()
@@ -734,40 +796,45 @@ impl Agent {
     /// `selector` on the run loop's turn `delay` seconds from now. The run
     /// loop retains the agent until then, so the host destroying the editor
     /// cannot free it mid-call.
-    fn perform(agent: &AnyObject, selector: Sel, delay: f64) {
-        // SAFETY: the agent's own method, taking an object it ignores.
+    /// `selector` with `object` on the run loop's turn `delay` seconds from
+    /// now. The run loop retains the agent and the object until then, so the
+    /// host destroying the editor cannot free either mid-call.
+    fn perform(agent: &AnyObject, selector: Sel, object: Option<&AnyObject>, delay: f64) {
+        // SAFETY: the agent's own method, taking one object.
         let () = unsafe {
             msg_send![
                 agent,
                 performSelector: selector,
-                withObject: None::<&AnyObject>,
+                withObject: object,
                 afterDelay: delay
             ]
         };
     }
 
-    /// Call off this agent's pending `selector`, or every pending perform.
-    fn cancel(agent: &AnyObject, selector: Option<Sel>) {
+    /// Call off this agent's pending `selector` with `object`.
+    fn cancel(agent: &AnyObject, selector: Sel, object: Option<&AnyObject>) {
         // SAFETY: cancelling this object's own pending performs.
         let () = unsafe {
-            match selector {
-                Some(selector) => msg_send![
-                    NSObject::class(),
-                    cancelPreviousPerformRequestsWithTarget: agent,
-                    selector: selector,
-                    object: None::<&AnyObject>
-                ],
-                None => {
-                    msg_send![NSObject::class(), cancelPreviousPerformRequestsWithTarget: agent]
-                }
-            }
+            msg_send![
+                NSObject::class(),
+                cancelPreviousPerformRequestsWithTarget: agent,
+                selector: selector,
+                object: object
+            ]
         };
+    }
+
+    /// Call off every pending perform of this agent.
+    fn cancel_all(agent: &AnyObject) {
+        // SAFETY: cancelling this object's own pending performs.
+        let () =
+            unsafe { msg_send![NSObject::class(), cancelPreviousPerformRequestsWithTarget: agent] };
     }
 
     /// One chain of looks at a time: a switch mid-chain starts afresh.
     fn settle_later(agent: &AnyObject) {
-        Self::cancel(agent, Some(sel!(settle:)));
-        Self::perform(agent, sel!(settle:), SETTLE_DELAY);
+        Self::cancel(agent, sel!(settle:), None);
+        Self::perform(agent, sel!(settle:), None, SETTLE_DELAY);
     }
 }
 
@@ -785,9 +852,10 @@ extern "C-unwind" fn apply(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
     }
 }
 
-extern "C-unwind" fn host_close(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
+/// A click [`window_should_close`] deferred to here, with the window clicked.
+extern "C-unwind" fn host_close(this: &AnyObject, _: Sel, clicked: Option<&AnyObject>) {
     if let Some(own) = Agent::own(this) {
-        own.ask_host_close();
+        own.ask_host_close(clicked);
     }
 }
 
@@ -798,10 +866,15 @@ extern "C-unwind" fn settle(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
 }
 
 /// The close button: refused, and the host told instead on the run loop's
-/// next turn, once however often it is clicked before then.
-extern "C-unwind" fn window_should_close(this: &AnyObject, _: Sel, _: Option<&AnyObject>) -> Bool {
-    Agent::cancel(this, Some(sel!(hostClose:)));
-    Agent::perform(this, sel!(hostClose:), 0.0);
+/// next turn, once however often it is clicked before then. The window
+/// clicked goes with it, for the telling to check it is still the editor's.
+extern "C-unwind" fn window_should_close(
+    this: &AnyObject,
+    _: Sel,
+    window: Option<&AnyObject>,
+) -> Bool {
+    Agent::cancel(this, sel!(hostClose:), window);
+    Agent::perform(this, sel!(hostClose:), window, 0.0);
     Bool::NO
 }
 

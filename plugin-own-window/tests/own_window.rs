@@ -4,15 +4,18 @@
 //! not use.
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::Arc;
 
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2::runtime::AnyObject;
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{NSApplication, NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
-    use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults};
-    use plugin_own_window::{Limits, OwnSize, OwnWindow};
+    use objc2_foundation::{
+        NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults,
+    };
+    use plugin_own_window::{Limits, Move, OwnSize, OwnWindow};
 
     /// Not either plug-in's, so their remembered frames stay as they are.
     const NAME: &str = "plugin-own-window test";
@@ -28,6 +31,8 @@ mod macos {
         own: Arc<OwnWindow>,
         /// How often the host was told the window closed.
         closes: Rc<Cell<u32>>,
+        /// The moves the shell was told of, in order.
+        moves: Rc<RefCell<Vec<Move>>>,
     }
 
     /// Forget the frame AppKit remembers under the test's name.
@@ -36,16 +41,15 @@ mod macos {
         NSUserDefaults::standardUserDefaults().removeObjectForKey(&key);
     }
 
-    /// An editor's view, 300 by 200, opened in a host's window and handed to
-    /// its own window, out of it at once if `out`. The own window opens at
-    /// the view's size, as nothing is remembered.
-    fn fixture(mtm: MainThreadMarker, out: bool) -> Fixture {
-        forget();
+    /// An editor's view of `size`, opened in a host's window and handed to
+    /// its own window, out of it at once if `out`. Whatever frame is
+    /// remembered under the test's name stays.
+    fn opened(mtm: MainThreadMarker, out: bool, size: (f64, f64), limits: Limits) -> Fixture {
         // SAFETY: a plain window, created and owned on the main thread.
         let host_window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
-                NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(300.0, 200.0)),
+                NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(size.0, size.1)),
                 NSWindowStyleMask::Titled,
                 NSBackingStoreType::Buffered,
                 false,
@@ -55,22 +59,26 @@ mod macos {
         let host = host_window.contentView().unwrap();
         let view = NSView::initWithFrame(
             NSView::alloc(mtm),
-            NSRect::new(NSPoint::ZERO, NSSize::new(300.0, 200.0)),
+            NSRect::new(NSPoint::ZERO, NSSize::new(size.0, size.1)),
         );
         host.addSubview(&view);
         let own = OwnWindow::new(NAME);
         let closes = Rc::new(Cell::new(0));
         let counting = closes.clone();
+        let moves = Rc::new(RefCell::new(Vec::new()));
+        let told = moves.clone();
         // SAFETY: both views are alive.
         unsafe {
             own.open(
                 Retained::as_ptr(&host).cast_mut().cast(),
                 Retained::as_ptr(&view).cast_mut().cast(),
                 out,
+                limits,
                 Some(Box::new(move || {
                     counting.set(counting.get() + 1);
                     true
                 })),
+                Box::new(move |moved| told.borrow_mut().push(moved)),
             );
         }
         Fixture {
@@ -79,7 +87,15 @@ mod macos {
             view,
             own,
             closes,
+            moves,
         }
+    }
+
+    /// An editor's view, 300 by 200, with nothing remembered: the own
+    /// window opens at the view's size.
+    fn fixture(mtm: MainThreadMarker, out: bool) -> Fixture {
+        forget();
+        opened(mtm, out, (300.0, 200.0), LIMITS)
     }
 
     /// Run what was deferred to the run loop's next turns.
@@ -101,13 +117,18 @@ mod macos {
         (frame.origin.x, frame.origin.y + frame.size.height)
     }
 
+    fn content(window: &NSWindow) -> NSSize {
+        window.contentView().unwrap().frame().size
+    }
+
     fn close(fixture: Fixture) {
         fixture.own.close();
         fixture.host_window.close();
     }
 
-    /// (a) Undock, then dock: the view goes out and back, and the host's
-    /// view gets it back at the size it had in its own window.
+    /// (a) Undock, then dock: the shell is told of each move, the view goes
+    /// out and back, and the host's view gets it back at the size it had in
+    /// its own window.
     fn undock_then_dock(mtm: MainThreadMarker) {
         let f = fixture(mtm, false);
         assert!(f.own.offered());
@@ -115,6 +136,7 @@ mod macos {
         assert!(!f.own.is_out(), "a move is deferred to the run loop");
         turn();
         assert!(f.own.is_out());
+        assert_eq!(*f.moves.borrow(), [Move::Out((300, 200))]);
         let own_window = f.view.window().unwrap();
         assert!(!std::ptr::eq(&*own_window, &*f.host_window));
         assert_eq!(
@@ -122,8 +144,11 @@ mod macos {
             0.0,
             "the host's window is concealed"
         );
-        assert_eq!(f.own.take_size(LIMITS), Some(OwnSize::Resized((300, 200))));
-        assert_eq!(f.own.take_size(LIMITS), None);
+        assert_eq!(
+            f.own.take_size(LIMITS),
+            None,
+            "the window is the view's size"
+        );
 
         // The player resizes the window; the shell gives the view its size.
         own_window.setContentSize(NSSize::new(400.0, 250.0));
@@ -133,6 +158,7 @@ mod macos {
         f.own.want(false);
         turn();
         assert!(!f.own.is_out());
+        assert_eq!(*f.moves.borrow(), [Move::Out((300, 200)), Move::Back]);
         assert!(same(superview(&f.view), &*f.host));
         assert_eq!(f.view.frame().size, NSSize::new(400.0, 250.0));
         assert_eq!(
@@ -147,9 +173,10 @@ mod macos {
         println!("own window: undock then dock moves the view out and back");
     }
 
-    /// (b) A close click, then a dock in the same turn: the dock, asked from
-    /// a frame before the click, is performed first and calls the close off.
-    /// A click alone tells the host once, however often it is repeated.
+    /// (b) A dock asked for from a frame, then a close click in the same
+    /// turn: the click is queued behind the dock, which leaves its window
+    /// gone, and the docked editor stays open. A click alone tells the host
+    /// once, however often it is repeated.
     fn close_click(mtm: MainThreadMarker) {
         let f = fixture(mtm, true);
         assert!(f.own.is_out(), "opened out of the host's window at once");
@@ -172,7 +199,97 @@ mod macos {
         assert_eq!(f.closes.get(), 1, "the host was told twice");
         assert!(f.own.is_out(), "the close button closed the window itself");
         close(f);
-        println!("own window: a close click tells the host once, and a dock calls it off");
+        println!("own window: a click tells the host once, and a dock ahead of it drops it");
+    }
+
+    define_class!(
+        /// A frame of the plug-in's, asking for the own window from a turn
+        /// of the run loop queued among the crate's own.
+        #[unsafe(super = NSObject)]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = Arc<OwnWindow>]
+        struct Asker;
+
+        impl Asker {
+            #[unsafe(method(wantOut:))]
+            fn want_out(&self, _: Option<&AnyObject>) {
+                self.ivars().want(true);
+            }
+        }
+    );
+
+    /// (f) A click, then a dock and an undock again within the turn: the
+    /// click is told only about the window it was made in. A dock is asked
+    /// for, withdrawn and asked for again, with an undock asked for from a
+    /// frame queued between: a withdrawn move left queued would dock, then
+    /// open a replacement window ahead of the click, whose telling would
+    /// close the replacement's editor.
+    fn click_dock_undock(mtm: MainThreadMarker) {
+        let f = fixture(mtm, true);
+        let clicked = f.view.window().unwrap();
+        let asker: Retained<Asker> = {
+            let allocated = Asker::alloc(mtm).set_ivars(f.own.clone());
+            unsafe { msg_send![super(allocated), init] }
+        };
+        f.own.want(false);
+        f.own.want(true);
+        // SAFETY: the asker's own method; the run loop retains it until then.
+        let () = unsafe {
+            msg_send![
+                &*asker,
+                performSelector: sel!(wantOut:),
+                withObject: None::<&AnyObject>,
+                afterDelay: 0.0f64
+            ]
+        };
+        f.own.want(false);
+        clicked.performClose(None);
+        turn();
+        let now = f.view.window().unwrap();
+        assert!(
+            f.closes.get() == 0 || std::ptr::eq(&*now, &*clicked),
+            "a replacement window's editor was closed"
+        );
+        assert!(
+            std::ptr::eq(&*now, &*clicked),
+            "a withdrawn move was performed"
+        );
+        assert_eq!(
+            f.closes.get(),
+            1,
+            "the click on the editor's window was dropped"
+        );
+        close(f);
+        println!("own window: a click is told only about the window clicked");
+    }
+
+    /// (g) A close the agent hears from a window that is no longer the
+    /// editor's, as a click deferred across a dock and an undock would be:
+    /// dropped.
+    fn stale_click(mtm: MainThreadMarker) {
+        let f = fixture(mtm, true);
+        let first = f.view.window().unwrap();
+        f.own.want(false);
+        turn();
+        f.own.want(true);
+        turn();
+        let second = f.view.window().unwrap();
+        assert!(!std::ptr::eq(&*first, &*second));
+        // SAFETY: the window's delegate, the crate's agent, answers it.
+        let agent: Option<Retained<AnyObject>> = unsafe { msg_send![&*second, delegate] };
+        let agent = agent.unwrap();
+        let _: bool = unsafe { msg_send![&*agent, windowShouldClose: &*first] };
+        turn();
+        assert_eq!(
+            f.closes.get(),
+            0,
+            "a click on a replaced window closed the editor"
+        );
+        second.performClose(None);
+        turn();
+        assert_eq!(f.closes.get(), 1);
+        close(f);
+        println!("own window: a click from a replaced window is dropped");
     }
 
     /// (c) Dropping the object, out with a dock and a close click pending,
@@ -184,6 +301,7 @@ mod macos {
             view,
             own,
             closes,
+            moves,
         } = fixture(mtm, true);
         let own_window = view.window().unwrap();
         own.want(false);
@@ -191,6 +309,11 @@ mod macos {
         let weak = Arc::downgrade(&own);
         drop(own);
         assert!(weak.upgrade().is_none());
+        assert_eq!(
+            moves.borrow().last(),
+            Some(&Move::Back),
+            "the close was not told"
+        );
         turn();
         assert_eq!(closes.get(), 0);
         assert!(!same(superview(&view), &*host), "a dock ran after the drop");
@@ -220,18 +343,15 @@ mod macos {
     }
 
     /// (d) A size the plug-in asks for keeps the window's top-left corner,
-    /// and is not reported back to it.
+    /// is returned as applied, and is not reported back.
     fn resize_keeps_top_left(mtm: MainThreadMarker) {
         let f = fixture(mtm, true);
         let own_window = f.view.window().unwrap();
-        assert_eq!(f.own.take_size(LIMITS), Some(OwnSize::Resized((300, 200))));
+        assert_eq!(f.own.take_size(LIMITS), None);
         let before = top_left(&own_window);
-        assert!(f.own.resize((500, 320)));
+        assert_eq!(f.own.resize((500, 320)), Some((500, 320)));
         assert_eq!(top_left(&own_window), before);
-        assert_eq!(
-            own_window.contentView().unwrap().frame().size,
-            NSSize::new(500.0, 320.0)
-        );
+        assert_eq!(content(&own_window), NSSize::new(500.0, 320.0));
         assert_eq!(f.own.take_size(LIMITS), None);
         close(f);
         println!("own window: a resize keeps the top-left corner");
@@ -257,15 +377,48 @@ mod macos {
         println!("own window: later limits replace earlier ones");
     }
 
+    /// (h) Reopened over a remembered frame the limits have since outgrown,
+    /// with a view of another size: the window opens within the limits, as
+    /// large as the minimum, and the shell is told that size at the move and
+    /// the view takes it at the next frame.
+    fn reopen_remembered(mtm: MainThreadMarker) {
+        let f = fixture(mtm, true);
+        assert_eq!(f.own.resize((500, 320)), Some((500, 320)));
+        close(f);
+        turn();
+
+        let limits = Limits {
+            min: (600, 400),
+            max: (2000, 2000),
+        };
+        let f = opened(mtm, true, (350.0, 250.0), limits);
+        let own_window = f.view.window().unwrap();
+        assert_eq!(own_window.contentMinSize(), NSSize::new(600.0, 400.0));
+        assert_eq!(content(&own_window), NSSize::new(600.0, 400.0));
+        assert_eq!(*f.moves.borrow(), [Move::Out((600, 400))]);
+        assert_eq!(f.own.take_size(limits), Some(OwnSize::Resized((600, 400))));
+        assert_eq!(f.own.take_size(limits), None);
+        close(f);
+        println!("own window: a remembered frame reopens within the limits");
+    }
+
     pub fn run() {
         autoreleasepool(|_| {
             let mtm = MainThreadMarker::new().expect("native test runs on the main thread");
             let _app = NSApplication::sharedApplication(mtm);
             undock_then_dock(mtm);
             close_click(mtm);
+            click_dock_undock(mtm);
+            stale_click(mtm);
             drop_with_calls_pending(mtm);
             resize_keeps_top_left(mtm);
             limits_follow(mtm);
+            reopen_remembered(mtm);
+        });
+        // Once every window is gone: a window saves its frame again as it
+        // goes, so forgetting earlier would leave one behind.
+        autoreleasepool(|_| {
+            turn();
             forget();
         });
     }
