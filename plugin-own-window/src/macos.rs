@@ -230,12 +230,24 @@ fn tuck(window: &NSWindow, pid: i32) -> bool {
 const SETTLE_DELAY: f64 = 0.05;
 const SETTLE_TRIES: u8 = 10;
 
+/// A class to build under `prefix` and a name unique to this load of the
+/// crate: see [`Agent`] for why.
+fn unique_class(prefix: &str, superclass: &AnyClass) -> ClassBuilder {
+    let unique = NSProcessInfo::processInfo().globallyUniqueString();
+    let name =
+        CString::new(format!("{prefix}_{unique}")).expect("a process-unique string holds no NUL");
+    ClassBuilder::new(&name, superclass).expect("a process-unique class name is free")
+}
+
 /// The class of the editor's own window: an NSWindow that stays in the one
-/// Space it is in, whatever collection behavior it is given.
+/// Space it is in, and is never made fullscreen, whatever collection behavior
+/// it is given ([`ONE_SPACE`]).
 ///
 /// Bitwig's plug-in host gives every window in its process one that joins all
-/// Spaces (read off the window server's tags of the live windows, which match
-/// a window given `CanJoinAllSpaces`), the editor's own included. Such a window
+/// Spaces, the editor's own included: its `fixWindow:` sends
+/// `setCollectionBehavior:` with `CanJoinAllSpaces | Managed |
+/// FullScreenAuxiliary`, and the live windows' window-server tags match a
+/// window given `CanJoinAllSpaces`. Such a window
 /// is also in a fullscreen game's Space, where it shows over the game as it
 /// comes forward until the game raises its own window (about 0.7 s, measured
 /// with Baldur's Gate 3, launched or tabbed to).
@@ -244,11 +256,7 @@ const SETTLE_TRIES: u8 = 10;
 fn managed_window() -> &'static AnyClass {
     static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
     CLASS.get_or_init(|| {
-        let unique = NSProcessInfo::processInfo().globallyUniqueString();
-        let name = CString::new(format!("PluginOwnWindow_{unique}"))
-            .expect("a process-unique string holds no NUL");
-        let mut builder = ClassBuilder::new(&name, NSWindow::class())
-            .expect("a process-unique class name is free");
+        let mut builder = unique_class("PluginOwnWindow", NSWindow::class());
         // SAFETY: the function's signature is the selector's: the receiver,
         // the selector, then the behavior, returning nothing.
         unsafe {
@@ -261,7 +269,13 @@ fn managed_window() -> &'static AnyClass {
     })
 }
 
-/// Any collection behavior asked of the own window: managed, in one Space.
+/// The own window's collection behavior, whatever it is asked: in one Space,
+/// and with a green button that zooms, as Bitwig's `FullScreenAuxiliary` had
+/// it do, rather than taking the editor to a fullscreen Space of its own.
+const ONE_SPACE: NSWindowCollectionBehavior =
+    NSWindowCollectionBehavior::Managed.union(NSWindowCollectionBehavior::FullScreenNone);
+
+/// Any collection behavior asked of the own window: [`ONE_SPACE`].
 extern "C-unwind" fn set_collection_behavior(
     this: &AnyObject,
     _: Sel,
@@ -271,7 +285,7 @@ extern "C-unwind" fn set_collection_behavior(
     let () = unsafe {
         msg_send![
             super(this, NSWindow::class()),
-            setCollectionBehavior: NSWindowCollectionBehavior::Managed
+            setCollectionBehavior: ONE_SPACE
         ]
     };
 }
@@ -343,6 +357,8 @@ impl OwnWindow {
         closed: Option<Box<dyn Fn() -> bool>>,
         moving: Box<dyn Fn(Move)>,
     ) {
+        // First, so a call off the main thread panics before it changes anything.
+        let state = self.state();
         // SAFETY: as the caller promises.
         let (Some(host), Some(view)) = (unsafe { retain_view(host) }, unsafe { retain_view(view) })
         else {
@@ -361,7 +377,7 @@ impl OwnWindow {
                     None,
                 );
         }
-        *self.state().borrow_mut() = State {
+        *state.borrow_mut() = State {
             host: Some(host),
             view: Some(view),
             agent: Some(agent),
@@ -535,7 +551,8 @@ impl OwnWindow {
         // Already NO for a plain NSWindow; said anyway, since it is the whole
         // difference from the host's window.
         own.setHidesOnDeactivate(false);
-        // In one Space: see `managed_window`, whose class keeps it so.
+        // In one Space: see `managed_window`, whose class sets `ONE_SPACE`
+        // for any behavior, this one too.
         own.setCollectionBehavior(NSWindowCollectionBehavior::Managed);
         // The close button asks the agent, which refuses it and tells the
         // host. The window keeps the delegate weakly; `State` owns both.
@@ -811,11 +828,7 @@ impl Agent {
     fn class() -> &'static AgentClass {
         static CLASS: OnceLock<AgentClass> = OnceLock::new();
         CLASS.get_or_init(|| {
-            let unique = NSProcessInfo::processInfo().globallyUniqueString();
-            let name = CString::new(format!("PluginOwnWindowAgent_{unique}"))
-                .expect("a process-unique string holds no NUL");
-            let mut builder = ClassBuilder::new(&name, NSObject::class())
-                .expect("a process-unique class name is free");
+            let mut builder = unique_class("PluginOwnWindowAgent", NSObject::class());
             builder.add_ivar::<*const c_void>(OWN);
             // SAFETY: each function's signature is the selector's: the
             // receiver, the selector, then one object argument, returning

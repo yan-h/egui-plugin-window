@@ -472,7 +472,7 @@ Kept as local patches rather than proposed upstream.
 otonal's `crates/otonal-plugin/src/editor/pop_out.rs`, read at otonal `d22d5533` (branch `switch-to-egui-plugin-window`),
 and harmonigraph's `crates/harmonigraph-plugin/src/editor/pop_out.rs`, read at harmonigraph `5a1fce2c` (branch `claude/no-work-left-to-frames`).
 otonal's was ported from harmonigraph's at harmonigraph `b154fe82`; which side each behaviour takes was settled in yan-h/otonal#1673 ("The own window, compared").
-- **From both, unchanged**: the window's level, Spaces and stacking behind other apps (`front_changed`, `tuck`, `settle`), the host's window concealed rather than hidden, moves deferred to the run loop, and the close button telling the host rather than closing.
+- **From both, unchanged**: the window's level and stacking behind other apps (`front_changed`, `tuck`, `settle`), the host's window concealed rather than hidden, moves deferred to the run loop, and the close button telling the host rather than closing.
 - **From harmonigraph's**: one object per open editor, owned by the editor handle, with weak references elsewhere and its cleanup on drop;
 the main-thread rule held by `dispatch2::MainThreadBound` rather than a `Mutex` and `unsafe impl Send`;
 the latch that tells the host of a close click once;
@@ -485,7 +485,11 @@ a resize the plug-in asks for keeps the window's top-left corner, computed in on
 AppKit's own `setContentSize:` kept the top-left too where measured (this repository's tests, macOS 26 and 27), but nothing documents it,
 so for harmonigraph, whose copy left it to AppKit, this is very likely no visible change.
 - **In neither**:
-  - The agent's Objective-C class is built at run time under a process-unique name. Both plug-ins link this crate into one host process, whose class names are shared.
+  - The window stays in its one Space. Both copies set `Managed` once, at creation (otonal#1204, harmonigraph#1615), and Bitwig's plug-in host then replaced it, as it does on every window in its process, with `CanJoinAllSpaces | Managed | FullScreenAuxiliary` (its `fixWindow:`).
+  The window then showed in a fullscreen game's Space for about 0.7 s as the game came forward (measured with Baldur's Gate 3; yan-h/egui-plugin-window#28).
+  The window is of a class whose `setCollectionBehavior:` sets `Managed | FullScreenNone` whatever it is asked: the green button zooms, as Bitwig's `FullScreenAuxiliary` had it do.
+  It stays on its desktop when the player switches to another, where Bitwig's setting had it follow (decided by Yan, 2026-11-20, in #28).
+  - The agent's and the window's Objective-C classes are built at run time under process-unique names. Both plug-ins link this crate into one host process, whose class names are shared.
   objc2 0.6.4's `define_class!` names a class `module_path!()::Name` plus the crate version, and when a class of that auto-generated name already exists it does not panic:
   `define_class` in `src/__macro_helpers/define_class.rs` takes the `else` branch of `ClassBuilder::new` and returns `AnyClass::get(c_name)` ("we assume that the existing class is the one that we want", lines 248-297; it panics only for a name given with `#[name = ...]`).
   The second plug-in would then use the first one's class, with the first build's methods and instance layout.
@@ -507,4 +511,4 @@ so for harmonigraph, whose copy left it to AppKit, this is very likely no visibl
   the saved choice of window is asked for by `host_set_size` only while the editor is not attached, rather than read by an own-window trait;
   and a move out accepts the own window's size at once, as harmonigraph's `moving` did, rather than at the next frame.
   `OwnWindow` stays public beside it until harmonigraph's shell moves onto `EditorSize` (harmonigraph#1814, its GUI step); then `OwnWindow`'s sizing calls, `Move` and `OwnSize` can leave the public surface.
-- **Tests**: `tests/own_window.rs` (the moves and their notices, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, a reopen over a remembered frame, the shared size sequence on a real window), `src/size.rs`'s unit tests (otonal's, and the limits and the saved choice) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).
+- **Tests**: `tests/own_window.rs` (the moves and their notices, the window held in one Space, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, a reopen over a remembered frame, the shared size sequence on a real window), `src/size.rs`'s unit tests (otonal's, and the limits and the saved choice) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).

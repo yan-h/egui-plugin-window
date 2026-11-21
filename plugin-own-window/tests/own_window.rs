@@ -197,11 +197,15 @@ mod macos {
         let own_window = f.view.window().unwrap();
         assert!(!std::ptr::eq(&*own_window, &*f.host_window));
         // As Bitwig's plug-in host asks of every window in its process.
-        own_window.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces);
+        own_window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Managed
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
         assert_eq!(
             own_window.collectionBehavior(),
-            NSWindowCollectionBehavior::Managed,
-            "the window stays in its one Space"
+            NSWindowCollectionBehavior::Managed | NSWindowCollectionBehavior::FullScreenNone,
+            "the window stays in its one Space, and is never fullscreen"
         );
         assert_eq!(
             f.host_window.alphaValue(),
