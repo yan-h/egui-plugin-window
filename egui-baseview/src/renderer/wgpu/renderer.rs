@@ -335,9 +335,15 @@ impl DrawGpuTimer {
                     _ => {}
                 }
                 let ms = {
+                    // A range wgpu refuses to hand out is a failed map by
+                    // another name, and is dropped the same way.
+                    let Ok(view) = self.staging.slice(..).get_mapped_range() else {
+                        self.staging = Self::staging(device);
+                        self.state = EguiTimerState::Idle;
+                        return None;
+                    };
                     // Read by hand rather than casting: this crate has no
                     // bytemuck, and it is two little-endian u64s.
-                    let view = self.staging.slice(..).get_mapped_range();
                     let at = |i: usize| {
                         u64::from_le_bytes(view[i * 8..i * 8 + 8].try_into().unwrap_or_default())
                     };
@@ -642,13 +648,13 @@ impl Renderer {
     /// lists a texture here once no primitive references it, and a texture
     /// still in flight from an earlier submit is kept alive by wgpu's own
     /// refcount rather than by this handle.
-    fn free_textures(&self, full_output: &FullOutput) {
+    fn free_textures(&self, full_output: &mut FullOutput) {
         if full_output.textures_delta.free.is_empty() {
             return;
         }
         let mut renderer = self.render_state.renderer.write();
-        for id in &full_output.textures_delta.free {
-            renderer.free_texture(id);
+        for id in full_output.textures_delta.free.drain() {
+            renderer.free_texture(&id);
         }
     }
 
@@ -727,17 +733,18 @@ impl Renderer {
         let user_cmd_bufs = {
             let mut renderer = self.render_state.renderer.write();
             let tex_start = std::time::Instant::now();
-            for (id, image_delta) in &full_output.textures_delta.set {
-                // NOTE: `update_buffers` is also where egui-wgpu runs paint
-            // callbacks' `prepare`, so the lattice's buffer writes — and the
-            // GPU timer's `device.poll` — are inside this reading too. A
-            // measurement that pays for itself has to be visible somewhere.
-            renderer.update_texture(
-                    &self.render_state.device,
-                    &self.render_state.queue,
-                    *id,
-                    image_delta,
-                );
+            // Drained, as `free_textures` drains the frees: egui's delta
+            // asserts it was applied when dropped. Textures in any order, each
+            // one's deltas in theirs.
+            for (id, image_deltas) in full_output.textures_delta.set.drain() {
+                for image_delta in &image_deltas {
+                    renderer.update_texture(
+                        &self.render_state.device,
+                        &self.render_state.queue,
+                        id,
+                        image_delta,
+                    );
+                }
             }
 
             // The font texture is current here: every delta above has landed,
@@ -753,6 +760,10 @@ impl Renderer {
 
             self.last_texture_ms = tex_start.elapsed().as_secs_f32() * 1000.0;
 
+            // NOTE: `update_buffers` is also where egui-wgpu runs paint
+            // callbacks' `prepare`, so the lattice's buffer writes — and the
+            // GPU timer's `device.poll` — are inside this reading too. A
+            // measurement that pays for itself has to be visible somewhere.
             let ubuf_start = std::time::Instant::now();
             let bufs = renderer.update_buffers(
                 &self.render_state.device,
@@ -949,7 +960,7 @@ impl Renderer {
 
         #[cfg(all(feature = "frame-log", target_os = "macos"))]
         crate::frame_log::submitted();
-        output_frame.present();
+        self.render_state.queue.present(output_frame);
         self.last_submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
         true

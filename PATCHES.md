@@ -184,7 +184,7 @@ Kept as a local patch rather than proposed upstream.
 ## egui-baseview
 
 - **Upstream base**: `egui-baseview 0.3.0` from crates.io (the RustAudio
-fork used by nice-plug).
+fork used by nice-plug), ported to egui and egui-wgpu 0.37 and wgpu 30 (see "Upgrade").
 - **Pruned to the wgpu renderer on macOS** (#1810): the OpenGL renderer and its `opengl` feature, the `x11` features of copypasta and egui-wgpu, the examples and the upstream CI workflow are gone.
 The conditions constant on macOS are folded:
 cut, copy and paste take Cmd alone, and the modifier translation and the wheel's flip take their macOS branches.
@@ -259,6 +259,7 @@ the new pair measured 0 of 60 reversed on Metal.
 Queue-staged uploads and callback-owned command buffers stay outside it.
 Readback is a four-step cycle polled with `PollType::Poll`, never `Wait` —
 blocking for the number would stall the pipeline being measured.
+A mapped range wgpu refuses to hand out is dropped as a failed map is: a fresh staging buffer and no reading.
 The resolve waits for `on_submitted_work_done` and goes in its own submission:
 resolved with the frame, an M5 Pro under macOS 27 read the closing slot before its stamp landed on 98 of 100 frames,
 and the slot kept the last frame's value, so nearly every pair came out reversed and was dropped.
@@ -341,6 +342,8 @@ every settings `ScrollArea` stopped, while the pictures, which also read `zoom_d
 That is the symptom of #501's stranded drag with no drag at all, so `end_stranded_drag` had nothing to end and the Console stayed silent.
 Mouse and key events now both replace all five fields with the event's own set, Cmd as `mac_cmd` and `command` on macOS;
 upstream egui-baseview 0.7 already has this shape.
+Since egui 0.37 keeps its modifiers in its input state and changes them only by `Event::ModifiersChanged`, the set goes to egui as that event, queued ahead of the event carrying it whenever it differs from what egui holds (`queue_modifiers`);
+the window keeps what egui holds in its own field, which a focus loss clears as egui does (Patch 25).
 - **Patch 17** (`src/window.rs`): stop drawing frames for a surface that
 keeps refusing to present (#989).
 A present refused three times in a row (`REFUSALS_BEFORE_BACKOFF`) is offered another only every 250 ms (`SURFACE_RETRY`) instead of every frame, because an occluded window's acquire is refused rather than waited on, and drawing anyway submitted 60-144 unpresented frames a second against 13-37 ms of GPU work with nothing pacing them —
@@ -351,6 +354,8 @@ it still covers that disagreement (a surface wgpu-hal reads as occluded in a win
 Texture deltas need no exemption: every pass renders (Patch 22), so a frame carrying one is never skipped and glyph coordinates never point into a stale atlas.
 The same change also runs `free_textures` on all three render exits instead of only past the acquire:
 a `free`-only delta on a bailing frame used to drop egui's texture-manager ids permanently, leaking the retired atlas exactly when the backoff above forces a frame through on the strength of consuming that delta.
+Both halves are drained, the uploads before the acquire and the frees on every exit, since egui 0.37's delta asserts in a debug build that it was applied when dropped;
+the one pass that renders nothing, egui closing the root viewport, clears it.
 `pass_due` (Patch 22's, which carries this backoff) and `after_render` are pure functions with their own tests in `egui-baseview`, which `ci.sh` runs.
 - **Patch 18** (`src/window.rs`, `src/translate.rs`): one rule for which keys the editor owns and which go to the host (#1433), shared by both plug-ins.
 Every key reaches the editor first, and `owns_key` decides from the state the last egui pass left;
@@ -366,8 +371,9 @@ and bare Escape, which clears that selection (#1674);
 the arrows and Cmd-A, which move it, stay the host's, since a stray click on a label would otherwise take the arrows from the DAW.
 A focused text field (`Context::text_edit_focused`, which a `DragValue` being typed into counts as) owns typing and TextEdit's editing keys (`text_edit_owns_key`),
 and a listed shortcut it does not use goes to the host.
-That table mirrors egui 0.35's TextEdit event handling, `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs` and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs`,
+That table mirrors egui 0.37's TextEdit event handling, `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs` and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs`,
 so an egui upgrade re-derives it from them.
+Re-derived for 0.37: the key arms are unchanged from 0.35, and a field's completion popup (`widgets/text_edit/completion.rs`, new) reads only the bare arrows, Enter, Tab and Escape, which the table already owns.
 Its clipboard chords are any Command chord on C, X or V, as both forks read them.
 With no text field focused, the editor owns exactly the shortcuts the app lists with `Queue::set_shortcuts`, matched exactly,
 so the editor's undo and redo never reach the DAW while the editor window has the keyboard.
@@ -436,6 +442,8 @@ egui's keyboard zoom (Cmd-plus, Cmd-equals, Cmd-minus) never fires, since neithe
 and Cmd-0, which egui reads as a reset to 1, reaches egui only where a plug-in lists it as a shortcut (Patch 18), and otherwise goes to the host alone.
 - **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
 egui's input state reads that field, and ends a pane drag on focus loss by it.
+The focus-lost event also clears egui's held keys and modifiers, so it clears the window's record of them (Patch 16):
+otherwise a Cmd still down when the window comes back reads as up in egui until it changes, since nothing would resend it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
 AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
@@ -452,7 +460,13 @@ The window opens at the size its settings give, clamped to the device's limit.
 and a project that names `baseview` at another commit builds two, whose types do not meet, rather than pairing two commits that may not agree.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
-The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
+The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1.0, toolchain 1.99.1) kept both bases and needed no baseview change;
+besides the patches noted above it gives a wheel event `MouseWheelSource::Unknown`, since baseview reports neither what scrolled nor the phase,
+ignores `OutputCommand::TextSelectionSettled`, since macOS has no primary selection,
+and presents through `Queue::present`.
+wgpu-hal 30's Metal present path is unchanged from 29's, and its acquire refuses an occluded window as before, so Patches 10, 12 and 17 carry over as they were.
+The `frame-log` feature needs harmonigraph's present observer ported to its wgpu-hal 30 and is unbuilt here.
+The [last comparison](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
 its disposition table stops at Patch 17, so dispose of later patches from their entries here.
 The egui 0.36 publication trigger is met and investigated,
 and egui-baseview 0.9.0 has been re-evaluated since (#1529);
