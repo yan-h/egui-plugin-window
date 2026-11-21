@@ -1,11 +1,10 @@
 //! AppKit needs the process's main thread, which the Rust test harness does not use.
 //!
 //! The unseen notice told once for each way a view stops being seen, and
-//! never inside the window handler's borrow: the notice sends the view an
-//! event through `trigger_event`, whose borrow is infallible and panics if
-//! the handler is still borrowed, and a loss found inside a frame, inside an
-//! event `trigger_event` delivers and inside one `trigger_deferrable_event`
-//! delivers is each told as that borrow ends. A window reads as visible only
+//! never inside the window handler's borrow: a loss found inside a frame,
+//! inside a pointer event and inside the keyboard's loss is each told as that
+//! borrow ends, which the handler checks by recording a notice that arrives
+//! while it runs. A window reads as visible only
 //! once the window server says so, which a test process may never see, so
 //! the window's occlusion state is set through `baseview::testing` (the
 //! `testing` feature); the view's own hiding, its ancestors' and its window
@@ -52,9 +51,8 @@ mod macos {
         told_while_handling: AtomicBool,
         /// The next frame hides its own view, as an app's frame might.
         hide_in_frame: AtomicBool,
-        /// The next event hides its own view: one `trigger_event` delivers
-        /// (a pointer entering) or one `trigger_deferrable_event` delivers
-        /// (the view giving up the keyboard).
+        /// The next event hides its own view: a pointer entering or the view
+        /// giving up the keyboard.
         hide_on_event: AtomicBool,
         /// The next frame hides its view and then closes its window.
         close_in_frame: AtomicBool,
@@ -86,12 +84,14 @@ mod macos {
         }
 
         fn on_event(&mut self, window: &mut Window, event: Event) -> EventStatus {
+            self.shared.handling.store(true, Ordering::Relaxed);
             if let Event::Window(WindowEvent::Occluded(occluded)) = event {
                 self.shared.occluded.store(1 + usize::from(occluded), Ordering::Relaxed);
             }
             if self.shared.hide_on_event.swap(false, Ordering::Relaxed) {
                 hide(window);
             }
+            self.shared.handling.store(false, Ordering::Relaxed);
             EventStatus::Ignored
         }
     }
@@ -127,8 +127,7 @@ mod macos {
                 if noticed.handling.load(Ordering::Relaxed) {
                     noticed.told_while_handling.store(true, Ordering::Relaxed);
                 }
-                // What a host call might do: an event through `trigger_event`,
-                // which panics if the handler is still borrowed.
+                // What a host call might do: send the view an event.
                 let view = noticed.view.load(Ordering::Relaxed);
                 if let Some(view) = unsafe { view.as_ref() } {
                     let _: () = unsafe { msg_send![view, mouseEntered: view] };
@@ -213,22 +212,22 @@ mod macos {
             shared.hide_in_frame.store(true, Ordering::Relaxed);
             assert!(fire(), "the frame that hides its view runs");
             assert_eq!(told(), 6, "a loss found inside a frame is told once the frame ends");
+            view.setHidden(false);
+
+            // Inside an event: the pointer entering.
+            shared.hide_on_event.store(true, Ordering::Relaxed);
+            let _: () = unsafe { msg_send![&*view, mouseEntered: &*view] };
+            assert_eq!(told(), 7, "a loss found inside a pointer event is told as it ends");
+            view.setHidden(false);
+
+            // Inside an event AppKit sends from its own call: the keyboard lost.
+            shared.hide_on_event.store(true, Ordering::Relaxed);
+            let _: bool = unsafe { msg_send![&*view, resignFirstResponder] };
+            assert_eq!(told(), 8, "a loss found inside the keyboard's loss is told as it ends");
             assert!(
                 !shared.told_while_handling.load(Ordering::Relaxed),
                 "told inside the handler's borrow",
             );
-            view.setHidden(false);
-
-            // Inside an event `trigger_event` delivers: the pointer entering.
-            shared.hide_on_event.store(true, Ordering::Relaxed);
-            let _: () = unsafe { msg_send![&*view, mouseEntered: &*view] };
-            assert_eq!(told(), 7, "a loss found inside trigger_event is told as it ends");
-            view.setHidden(false);
-
-            // Inside one `trigger_deferrable_event` delivers: the keyboard lost.
-            shared.hide_on_event.store(true, Ordering::Relaxed);
-            let _: bool = unsafe { msg_send![&*view, resignFirstResponder] };
-            assert_eq!(told(), 8, "a loss found inside a deferrable event is told as it ends");
             view.setHidden(false);
 
             // A loss owed inside the frame that closes the window.

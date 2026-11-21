@@ -176,7 +176,7 @@ impl BaseviewView {
             view.occlusion_observer.set(Some(observer));
 
             // Send an initial Resized event so users get the correct scale factor and physical size.
-            Self::trigger_deferrable_event(
+            Self::trigger_event(
                 view,
                 Event::Window(WindowEvent::Resized(Self::fetch_view_size(view.view))),
             );
@@ -232,11 +232,27 @@ impl BaseviewView {
         Self::view_did_change_backing_properties(this);
     }
 
-    /// Trigger the event immediately and return the event status.
-    /// Will panic if `window_handler` is already borrowed (see `trigger_deferrable_event`).
+    /// Hand the handler an event and return its answer, or, while the handler
+    /// is borrowed (the event arrived from inside a frame or another event),
+    /// queue it and answer `Ignored`.
+    ///
+    /// Queued rather than borrowed again, which would panic in Bitwig's
+    /// process. The queue holds events only while a borrow is held: every
+    /// holder, this and `trigger_frame`, drains it before letting go, and an
+    /// event arriving during the drain joins its end. So queued events reach
+    /// the handler in the order they arrived, ahead of any event after the
+    /// borrow ends.
+    ///
+    /// A queued event's answer is not known in time, and `Ignored` is the one
+    /// that loses nothing: a key goes to the host, so the host never misses a
+    /// release, and a drop is refused. What gives way is that a queued key
+    /// press the editor would have owned acts in both places.
     fn trigger_event(this: ViewRef<Self>, event: Event) -> EventStatus {
         let status = {
-            let mut handler = this.window_handler.borrow_mut();
+            let Ok(mut handler) = this.window_handler.try_borrow_mut() else {
+                this.deferred_events.borrow_mut().push_back(event);
+                return EventStatus::Ignored;
+            };
             let Some(handler) = handler.as_mut() else {
                 return EventStatus::Ignored;
             };
@@ -256,24 +272,6 @@ impl BaseviewView {
             ViewParentingType::Parented { parent_view } => parent_view.load(),
             ViewParentingType::Windowed { .. } => None,
         }
-    }
-
-    /// Trigger the event immediately if `window_handler` can be borrowed mutably,
-    /// otherwise add the event to a queue that will be cleared once `window_handler`'s mutable borrow ends.
-    /// As this method might result in the event triggering asynchronously, it can't reliably return the event status.
-    fn trigger_deferrable_event(this: ViewRef<Self>, event: Event) {
-        {
-            let Ok(mut handler) = this.window_handler.try_borrow_mut() else {
-                this.deferred_events.borrow_mut().push_back(event);
-                return;
-            };
-
-            let Some(handler) = handler.as_mut() else { return };
-
-            handler.on_event(&mut this.into(), event);
-            Self::send_deferred_events(this, handler.as_mut());
-        }
-        Self::pay_unseen(this);
     }
 
     /// Ask `is_visible` again and keep the answer, the view's one reading of
@@ -300,7 +298,7 @@ impl BaseviewView {
             return seen;
         }
         if was != seen || attached {
-            Self::trigger_deferrable_event(this, Event::Window(WindowEvent::Occluded(!seen)));
+            Self::trigger_event(this, Event::Window(WindowEvent::Occluded(!seen)));
         }
         if was && !seen {
             this.unseen_owed.set(true);
@@ -387,8 +385,8 @@ impl BaseviewView {
     ///
     /// What the dropped frame costs in that case is a tick, not more: the
     /// frame in flight paints, and the event queued behind it is drained when
-    /// it finishes. It is only this direction that is covered — `trigger_event`
-    /// still borrows infallibly, and says so.
+    /// it finishes, as `trigger_event` queues any event delivered inside a
+    /// borrow.
     fn trigger_frame(this: ViewRef<Self>) {
         // A view nobody can see runs no frame: one hidden, or in a window
         // covered, minimized, ordered out or on another Space. Asked of AppKit
@@ -459,7 +457,7 @@ impl BaseviewView {
             return;
         }
         this.exit_withheld.set(false);
-        Self::trigger_deferrable_event(this, Event::Mouse(MouseEvent::CursorLeft));
+        Self::trigger_event(this, Event::Mouse(MouseEvent::CursorLeft));
     }
 
     /// Report the release of a button the OS says is no longer held.
@@ -524,7 +522,7 @@ impl BaseviewView {
         // bug this whole path exists to repair, silently back.
         for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
             if confirmed & button_bit(button) != 0 {
-                Self::trigger_deferrable_event(
+                Self::trigger_event(
                     this,
                     Event::Mouse(ButtonReleased { button, position, modifiers }),
                 );
@@ -677,14 +675,14 @@ impl ViewImpl for BaseviewView {
         };
 
         if window.isKeyWindow() {
-            Self::trigger_deferrable_event(this, Event::Window(WindowEvent::Focused));
+            Self::trigger_event(this, Event::Window(WindowEvent::Focused));
         }
 
         true
     }
 
     fn resign_first_responder(this: ViewRef<Self>) -> bool {
-        Self::trigger_deferrable_event(this, Event::Window(WindowEvent::Unfocused));
+        Self::trigger_event(this, Event::Window(WindowEvent::Unfocused));
         true
     }
 
@@ -703,7 +701,7 @@ impl ViewImpl for BaseviewView {
         // other platform implementations
         if new_window_info.physical_size() != window_info.physical_size() {
             this.state.window_info.set(new_window_info);
-            Self::trigger_deferrable_event(
+            Self::trigger_event(
                 this,
                 Event::Window(WindowEvent::Resized(new_window_info)),
             );

@@ -151,7 +151,7 @@ harmonigraph ends an open host parameter gesture from a pass, and one begun just
 "Seen" is patch 9's frame test, `is_visible`, with one owner: `check_seen` asks it, keeps the answer in `seen`, and tells the app when it turns from seen to not seen.
 It is asked at every event that can change it: the occlusion notification, `viewDidHide` and `viewDidUnhide` (new `ViewImpl` methods, sent for an ancestor too), a move to another window or to none, and the frame gate on every link callback the frame divisor lets through, which repairs a lost notification up to `divisor` refreshes late while the link fires.
 Never at open (`seen` starts false and the open samples it), never on a reveal, never twice for one loss, and not once the window is closed, whose own removal from its window would otherwise read as one.
-It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame`, `trigger_event` or `trigger_deferrable_event` lets go, so the app may call its host, whatever the host does to this window in return.
+It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame` or `trigger_event` lets go, so the app may call its host, whatever the host does to this window in return.
 A loss found and undone within one borrow (the view taken out of a window and put back in a visible one during a frame) is still told, and nothing is told once the window is closed, a loss owed from inside the closing borrow included.
 `pay_unseen` calls a clone of the notice, so a host destroying the editor from inside the call cannot free the closure while it runs.
 Otherwise it runs synchronously inside AppKit's own hide and move callbacks, so it can arrive inside the app's own calls that hide the view or move it between windows: a view moved into a window not yet on screen reads as not seen, so a plug-in moving its editor into a window of its own is told at the move.
@@ -161,7 +161,7 @@ No notice set, nothing changes; otonal sets none.
 The `testing` feature (native tests only; no plug-in enables it) lets a test set what a window's occlusion state reads as (`baseview::testing::set_window_shows`), since a window reads as visible only once the window server says so, which a test process may never see.
 `tests/unseen_notice.rs` (no harness, as `host_keys.rs`), which `ci.sh` runs with that feature, checks one call each for the view hidden, an ancestor hidden, the window occluded by notification, the window occluded with the notification lost and the next link callback finding it, and the view taken out of its window;
 none at open, on a reveal, on a move back, for a repeat, or at close;
-and that a loss found inside a frame, inside an event `trigger_event` delivers and inside one `trigger_deferrable_event` delivers is told after each lets go, by a notice that sends the view an event through `trigger_event`, whose infallible borrow would panic inside the handler's.
+and that a loss found inside a frame, inside a pointer event and inside the keyboard's loss is told after each lets go, by a handler that records a notice arriving while it runs.
 - **Patch 12** (`src/platform/macos/view.rs`, `tests/unseen_notice.rs`): one reading of whether the view can be seen (#15).
 `check_seen` asks patch 9's `is_visible` and keeps the answer, `seen`, which patch 11's notice already read;
 the handler's `Occluded` is now told from it, on a change and on every answer for a window just attached to, in place of patch 3's second reading of the window alone (`window_visible`, `report_window_occlusion`).
@@ -169,6 +169,16 @@ A gain runs patch 3's reveal frame where the event that found it asks: the occlu
 So a view hidden inside a visible window is told `Occluded(true)` too, and its renderer hides its layer then and draws the reveal frame at un-hide;
 a frame gate that finds a change a lost notification never reported tells it as well, rather than leaving `Occluded` stale;
 and a view taken out of its window is told `Occluded(true)` as it leaves.
+- **Patch 13** (`src/platform/macos/view.rs`, `tests/reentrant_events.rs`, `tests/unseen_notice.rs`, `Cargo.toml`): an event delivered inside the handler's borrow is queued, never a panic.
+Upstream's `trigger_event` borrowed the handler infallibly, so an event AppKit delivered from inside a call the handler made (a frame or an event running) panicked in Bitwig's process;
+only window events went through `trigger_deferrable_event`, which queued them.
+Now every event goes through `trigger_event`, which queues it when the borrow is taken and answers `Ignored`, and `trigger_deferrable_event` is gone.
+The queue holds events only while a borrow is held, since `trigger_event` and `trigger_frame` each drain it before letting go and an event arriving during the drain joins its end,
+so a queued event reaches the handler in the order it arrived, ahead of any event after the borrow ends.
+`Ignored` is the answer that loses nothing: a queued key goes to the host, so the host never misses a release, and a queued drop is refused.
+Unprotected: a queued key press the editor would have owned acts in both the editor and the host (egui-baseview's Patch 18 keeps one keystroke in one place only for keys answered in time).
+`tests/reentrant_events.rs` (no harness) sends keys to the view from inside the handler's own key event and checks their order and that they reached the host;
+`tests/unseen_notice.rs`, whose notice used to detect a call inside the borrow by that panic, now has the handler record one instead.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
