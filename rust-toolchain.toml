@@ -1,6 +1,6 @@
-# The toolchain both projects pin, so what passes here builds in both; egui
-# 0.37 and wgpu 30 need 1.95. A project builds these crates with its own
-# toolchain, whatever this says.
+# egui 0.37 and wgpu 30 need Rust 1.95; a project pinning these crates needs
+# at least that. A project builds them with its own toolchain, whatever this
+# says.
 [toolchain]
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]
