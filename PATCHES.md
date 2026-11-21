@@ -179,6 +179,8 @@ so a queued event reaches the handler in the order it arrived, ahead of any even
 Unprotected: a queued key press the editor would have owned acts in both the editor and the host (egui-baseview's Patch 18 keeps one keystroke in one place only for keys answered in time).
 `tests/reentrant_events.rs` (no harness) sends keys to the view from inside the handler's own key event and checks their order and that they reached the host;
 `tests/unseen_notice.rs`, whose notice used to detect a call inside the borrow by that panic, now has the handler record one instead.
+- **Patch 14** (`src/clipboard.rs`, `src/platform/macos/window.rs`, `src/platform/none.rs`, `Cargo.toml`): `clipboard_text` reads the general pasteboard, beside upstream's `copy_to_clipboard`, for egui-baseview's paste (its Patch 31).
+A copied file reads as its path, as copypasta's did, else the plain text; off macOS it reads none.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -187,7 +189,7 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see with its unseen notice, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see with its unseen notice, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, events queued inside the handler's borrow, the pasteboard read, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
@@ -195,10 +197,10 @@ Kept as a local patch rather than proposed upstream.
 
 - **Upstream base**: `egui-baseview 0.3.0` from crates.io (the RustAudio
 fork used by nice-plug), ported to egui and egui-wgpu 0.37 and wgpu 30 (see "Upgrade").
-- **Pruned to the wgpu renderer on macOS** (#1810): the OpenGL renderer and its `opengl` feature, the `x11` features of copypasta and egui-wgpu, the examples and the upstream CI workflow are gone.
+- **Pruned to the wgpu renderer on macOS** (#1810): the OpenGL renderer and its `opengl` feature, the `x11` feature of egui-wgpu, the examples and the upstream CI workflow are gone.
 The conditions constant on macOS are folded:
 cut, copy and paste take Cmd alone, and the modifier translation and the wheel's flip take their macOS branches.
-Off macOS the clipboard is copypasta's no-op context, since no window opens there.
+The clipboard is baseview's (Patch 31).
 - **Patch 1** (1 call site, `src/window.rs` `on_frame`): the window resize that follows a physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
 on scaled displays the window/view ended up `pixels_per_point` times too large (2x-zoomed, bottom-left-anchored content on Retina).
 Convert with `logical_size_for`, at the native scale. The build path's site went with `Queue::resize` (Patch 29).
@@ -468,6 +470,12 @@ neither plug-in called the one or sent the other, and each was a second size wri
 The window opens at the size its settings give, clamped to the device's limit.
 - **Patch 30** (`Cargo.toml`): `baseview` by path (#9), so a project's pin of `egui-baseview` brings the `baseview` from the same commit,
 and a project that names `baseview` at another commit builds two, whose types do not meet, rather than pairing two commits that may not agree.
+- **Patch 31** (`src/window.rs`, `Cargo.toml`): the clipboard through baseview, not copypasta.
+egui's copy goes to `baseview::copy_to_clipboard` and a paste reads `baseview::clipboard_text` (baseview's Patch 14), both on objc2-app-kit 0.3, which baseview already builds;
+copypasta pulled a second objc2 generation (objc2 0.5, objc2-app-kit and objc2-foundation 0.2) into both plug-ins.
+Plain text is all egui copies or pastes. Neither call can fail in a way worth reporting, so the copy and paste error logs and the clipboard's failed-open path are gone;
+an empty pasteboard pastes nothing, as before. Off macOS baseview's stub reads none, as copypasta's no-op context did.
+`queue_key` takes the paste as a function, so its tests never read the real pasteboard.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1.0, toolchain 1.99.1) kept both bases and needed no baseview change;

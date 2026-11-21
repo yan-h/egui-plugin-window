@@ -6,19 +6,11 @@ use baseview::{
     Event, EventStatus, PhySize, Size, Window, WindowHandle, WindowHandler, WindowInfo,
     WindowOpenOptions, WindowScalePolicy,
 };
-use copypasta::ClipboardProvider;
 use egui::{Pos2, Rect, Rgba, ViewportCommand, pos2, vec2};
 use keyboard_types::Modifiers;
 use raw_window_handle::HasRawWindowHandle;
 
 use crate::{GraphicsConfig, renderer::Renderer};
-
-/// copypasta's native clipboard, which off macOS would need its `x11`
-/// feature; there baseview opens no window, so copypasta's no-op one stands in.
-#[cfg(target_os = "macos")]
-type Clipboard = copypasta::ClipboardContext;
-#[cfg(not(target_os = "macos"))]
-type Clipboard = copypasta::nop_clipboard::NopClipboardContext;
 
 #[cfg(feature = "nice-log")]
 use nice_plug_core::{nice_error as error, nice_warn as warn};
@@ -398,8 +390,6 @@ where
 
     renderer: Renderer,
 
-    clipboard_ctx: Option<Clipboard>,
-
     surface_size: SurfaceSize,
     /// See [`SizeSource`]: polled at the top of every frame, before the input
     /// that the frame is laid out from is built.
@@ -549,14 +539,6 @@ where
         // clamped where a size from elsewhere would be refused.
         let surface_size = SurfaceSize::clamped(initial_size, renderer.max_texture_side());
 
-        let clipboard_ctx = match Clipboard::new() {
-            Ok(clipboard_ctx) => Some(clipboard_ctx),
-            Err(e) => {
-                error!("Failed to initialize clipboard: {}", e);
-                None
-            }
-        };
-
         let start_time = Instant::now();
 
         Self {
@@ -572,8 +554,6 @@ where
             current_cursor_icon: baseview::MouseCursor::Default,
 
             renderer,
-
-            clipboard_ctx,
 
             surface_size,
             size_source: settings.size_source.clone(),
@@ -1237,13 +1217,7 @@ where
 
         for command in full_output.platform_output.commands {
             match command {
-                egui::OutputCommand::CopyText(text) => {
-                    if let Some(clipboard_ctx) = &mut self.clipboard_ctx
-                        && let Err(err) = clipboard_ctx.set_contents(text)
-                    {
-                        error!("Copy/Cut error: {}", err);
-                    }
-                }
+                egui::OutputCommand::CopyText(text) => baseview::copy_to_clipboard(&text),
                 // macOS has no primary selection to put it in.
                 egui::OutputCommand::TextSelectionSettled(_) => {}
                 egui::OutputCommand::CopyImage(_) => {
@@ -1369,8 +1343,8 @@ where
                 // Whose key this is, decided once: the host's answer and what
                 // egui is sent both follow it.
                 let owned = owns_key(&self.egui_ctx, &self.shortcuts, modifiers, event);
-                let clipboard = self.clipboard_ctx.as_mut();
-                queue_key(&mut self.egui_input.events, event, modifiers, owned, clipboard);
+                let paste = baseview::clipboard_text;
+                queue_key(&mut self.egui_input.events, event, modifiers, owned, paste);
                 return if owned { EventStatus::Captured } else { EventStatus::Ignored };
             }
             baseview::Event::Window(event) => match event {
@@ -1540,15 +1514,15 @@ fn press_sends(event: &keyboard_types::KeyboardEvent, modifiers: egui::Modifiers
 
 /// Send egui a key event as `owns_key` decided it. A press the host gets never
 /// reaches egui, so one keystroke acts in one place; an owned press brings its
-/// key and what it sends ([`press_sends`]). A release always reaches egui, so
-/// a key cannot stay held there when focus or modifiers changed after its
-/// press.
+/// key and what it sends ([`press_sends`]), a paste the clipboard's text that
+/// `paste` reads. A release always reaches egui, so a key cannot stay held
+/// there when focus or modifiers changed after its press.
 fn queue_key(
     events: &mut Vec<egui::Event>,
     event: &keyboard_types::KeyboardEvent,
     modifiers: egui::Modifiers,
     owned: bool,
-    clipboard: Option<&mut Clipboard>,
+    paste: impl FnOnce() -> Option<String>,
 ) {
     let pressed = event.state == keyboard_types::KeyState::Down;
     if pressed && !owned {
@@ -1571,16 +1545,7 @@ fn queue_key(
     match press_sends(event, modifiers) {
         PressSends::Cut => events.push(egui::Event::Cut),
         PressSends::Copy => events.push(egui::Event::Copy),
-        PressSends::Paste => {
-            if let Some(clipboard) = clipboard {
-                match clipboard.get_contents() {
-                    Ok(contents) => events.push(egui::Event::Text(contents)),
-                    Err(err) => {
-                        error!("Paste error: {}", err);
-                    }
-                }
-            }
-        }
+        PressSends::Paste => events.extend(paste().map(egui::Event::Text)),
         PressSends::Text(written) => events.push(egui::Event::Text(written.to_owned())),
         PressSends::Nothing => {}
     }
@@ -1823,7 +1788,7 @@ mod key_capture_tests {
     fn queued(event: &keyboard_types::KeyboardEvent, owned: bool) -> Vec<egui::Event> {
         let mut events = Vec::new();
         let modifiers = crate::translate::translate_modifiers(event.modifiers);
-        queue_key(&mut events, event, modifiers, owned, None);
+        queue_key(&mut events, event, modifiers, owned, || None);
         events
     }
 
