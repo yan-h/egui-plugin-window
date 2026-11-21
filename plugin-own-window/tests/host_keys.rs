@@ -130,6 +130,18 @@ mod macos {
         NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
     }
 
+    /// Turn the run loop until `done`, for up to two seconds: one turn was
+    /// not always enough for a deferred move on a loaded machine
+    /// (egui-plugin-window#24).
+    fn turn_until(done: impl Fn() -> bool) {
+        for _ in 0..40 {
+            if done() {
+                return;
+            }
+            turn();
+        }
+    }
+
     pub fn run() {
         // Dropped last, once every window is gone, which saves its frame
         // again as it goes.
@@ -182,7 +194,7 @@ mod macos {
             };
             for (mode, out) in [("own window", true), ("redocked", false)] {
                 own.want(out);
-                turn();
+                turn_until(|| own.is_out() == out);
                 assert_eq!(own.is_out(), out, "{mode}");
                 for captured in [false, true] {
                     capture.store(captured, Ordering::Relaxed);

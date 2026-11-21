@@ -5,8 +5,11 @@
 //! Bitwig takes every plug-in window off screen while another app is in
 //! front: the window it gives the editor sits at the floating level and is
 //! ordered out on deactivation, while the plug-in host process stays
-//! un-hidden. A window the plug-in creates itself is one Bitwig does not know
-//! about, and it stays up (checked in Bitwig, harmonigraph#1580). So on macOS
+//! un-hidden. A window the plug-in creates itself is one Bitwig does not order
+//! out, and it stays up (checked in Bitwig, harmonigraph#1580). Bitwig does
+//! give it, as every window in its process, a collection behavior that joins
+//! all Spaces, fullscreen games' among them; the window's class holds it in
+//! the one Space it is in, and out of fullscreen. So on macOS
 //! the editor lives in one unless the player docks it, and the host's window
 //! is then left open but invisible and click-through. Hiding it outright
 //! would be undone: Bitwig orders it back to the front whenever it is itself

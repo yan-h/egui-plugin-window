@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use dispatch2::MainThreadBound;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Ivar, Sel};
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, msg_send, sel};
+use objc2::{ClassType, MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{
     NSBackingStoreType, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowLevel,
     NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace,
@@ -230,6 +230,66 @@ fn tuck(window: &NSWindow, pid: i32) -> bool {
 const SETTLE_DELAY: f64 = 0.05;
 const SETTLE_TRIES: u8 = 10;
 
+/// A class to build under `prefix` and a name unique to this load of the
+/// crate: see [`Agent`] for why.
+fn unique_class(prefix: &str, superclass: &AnyClass) -> ClassBuilder {
+    let unique = NSProcessInfo::processInfo().globallyUniqueString();
+    let name =
+        CString::new(format!("{prefix}_{unique}")).expect("a process-unique string holds no NUL");
+    ClassBuilder::new(&name, superclass).expect("a process-unique class name is free")
+}
+
+/// The class of the editor's own window: an NSWindow that stays in the one
+/// Space it is in, and is never made fullscreen, whatever collection behavior
+/// it is given ([`ONE_SPACE`]).
+///
+/// Bitwig's plug-in host gives every window in its process one that joins all
+/// Spaces, the editor's own included: its `fixWindow:` sends
+/// `setCollectionBehavior:` with `CanJoinAllSpaces | Managed |
+/// FullScreenAuxiliary`, and the live windows' window-server tags match a
+/// window given `CanJoinAllSpaces`. Such a window
+/// is also in a fullscreen game's Space, where it shows over the game as it
+/// comes forward until the game raises its own window (about 0.7 s, measured
+/// with Baldur's Gate 3, launched or tabbed to).
+///
+/// Named uniquely per load of this crate, as [`Agent`]'s class is.
+fn managed_window() -> &'static AnyClass {
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        let mut builder = unique_class("PluginOwnWindow", NSWindow::class());
+        // SAFETY: the function's signature is the selector's: the receiver,
+        // the selector, then the behavior, returning nothing.
+        unsafe {
+            builder.add_method(
+                sel!(setCollectionBehavior:),
+                set_collection_behavior as extern "C-unwind" fn(_, _, _),
+            );
+        }
+        builder.register()
+    })
+}
+
+/// The own window's collection behavior, whatever it is asked: in one Space,
+/// and with a green button that zooms, as Bitwig's `FullScreenAuxiliary` had
+/// it do, rather than taking the editor to a fullscreen Space of its own.
+const ONE_SPACE: NSWindowCollectionBehavior =
+    NSWindowCollectionBehavior::Managed.union(NSWindowCollectionBehavior::FullScreenNone);
+
+/// Any collection behavior asked of the own window: [`ONE_SPACE`].
+extern "C-unwind" fn set_collection_behavior(
+    this: &AnyObject,
+    _: Sel,
+    _: NSWindowCollectionBehavior,
+) {
+    // SAFETY: NSWindow's own setter, on a window of a class derived from it.
+    let () = unsafe {
+        msg_send![
+            super(this, NSWindow::class()),
+            setCollectionBehavior: ONE_SPACE
+        ]
+    };
+}
+
 /// Keep the host's window out of sight and out of the way, but open: closing
 /// or hiding it is the host's to undo, and Bitwig does.
 fn conceal(window: &NSWindow) {
@@ -297,7 +357,8 @@ impl OwnWindow {
         closed: Option<Box<dyn Fn() -> bool>>,
         moving: Box<dyn Fn(Move)>,
     ) {
-        let mtm = main_thread();
+        // First, so a call off the main thread panics before it changes anything.
+        let state = self.state();
         // SAFETY: as the caller promises.
         let (Some(host), Some(view)) = (unsafe { retain_view(host) }, unsafe { retain_view(view) })
         else {
@@ -316,7 +377,7 @@ impl OwnWindow {
                     None,
                 );
         }
-        *self.state().borrow_mut() = State {
+        *state.borrow_mut() = State {
             host: Some(host),
             view: Some(view),
             agent: Some(agent),
@@ -326,7 +387,7 @@ impl OwnWindow {
             ..State::default()
         };
         if out {
-            self.pop(mtm);
+            self.pop();
         }
     }
 
@@ -436,20 +497,19 @@ impl OwnWindow {
     /// host has been told the window closed: the editor is on its way out,
     /// and a dock would ask the host for its size as it goes.
     fn apply(&self) {
-        let mtm = main_thread();
         let wanted = {
             let mut state = self.state().borrow_mut();
             let wanted = state.wanted.take();
             wanted.filter(|_| !state.closing)
         };
         match wanted {
-            Some(true) => self.pop(mtm),
+            Some(true) => self.pop(),
             Some(false) => self.dock(),
             None => {}
         }
     }
 
-    fn pop(&self, mtm: MainThreadMarker) {
+    fn pop(&self) {
         let (host, view, agent, closable, limits, moving) = {
             let state = self.state().borrow();
             let (None, Some(host), Some(view), Some(agent)) =
@@ -474,10 +534,11 @@ impl OwnWindow {
         if closable {
             style |= NSWindowStyleMask::Closable;
         }
-        // SAFETY: a plain window, created and owned on the main thread.
+        // SAFETY: a window of `managed_window`'s class, created and owned on
+        // the main thread; that class adds no state to NSWindow's.
         let own = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
+                msg_send![managed_window(), alloc],
                 NSRect::new(NSPoint::ZERO, content),
                 style,
                 NSBackingStoreType::Buffered,
@@ -490,9 +551,8 @@ impl OwnWindow {
         // Already NO for a plain NSWindow; said anyway, since it is the whole
         // difference from the host's window.
         own.setHidesOnDeactivate(false);
-        // Left to AppKit's default, a window that floats joins the Spaces it
-        // is carried through (measured in otonal: in both the desktop's and a
-        // fullscreen game's, shown over the game as it came forward).
+        // In one Space: see `managed_window`, whose class sets `ONE_SPACE`
+        // for any behavior, this one too.
         own.setCollectionBehavior(NSWindowCollectionBehavior::Managed);
         // The close button asks the agent, which refuses it and tells the
         // host. The window keeps the delegate weakly; `State` owns both.
@@ -768,11 +828,7 @@ impl Agent {
     fn class() -> &'static AgentClass {
         static CLASS: OnceLock<AgentClass> = OnceLock::new();
         CLASS.get_or_init(|| {
-            let unique = NSProcessInfo::processInfo().globallyUniqueString();
-            let name = CString::new(format!("PluginOwnWindowAgent_{unique}"))
-                .expect("a process-unique string holds no NUL");
-            let mut builder = ClassBuilder::new(&name, NSObject::class())
-                .expect("a process-unique class name is free");
+            let mut builder = unique_class("PluginOwnWindowAgent", NSObject::class());
             builder.add_ivar::<*const c_void>(OWN);
             // SAFETY: each function's signature is the selector's: the
             // receiver, the selector, then one object argument, returning

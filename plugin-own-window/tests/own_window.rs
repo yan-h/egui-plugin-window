@@ -11,7 +11,10 @@ mod macos {
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSView, NSWindow, NSWindowCollectionBehavior,
+        NSWindowStyleMask,
+    };
     use objc2_foundation::{
         NSDate, NSObject, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults,
     };
@@ -193,6 +196,17 @@ mod macos {
         assert_eq!(*f.moves.borrow(), [Move::Out((300, 200))]);
         let own_window = f.view.window().unwrap();
         assert!(!std::ptr::eq(&*own_window, &*f.host_window));
+        // As Bitwig's plug-in host asks of every window in its process.
+        own_window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Managed
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        assert_eq!(
+            own_window.collectionBehavior(),
+            NSWindowCollectionBehavior::Managed | NSWindowCollectionBehavior::FullScreenNone,
+            "the window stays in its one Space, and is never fullscreen"
+        );
         assert_eq!(
             f.host_window.alphaValue(),
             0.0,

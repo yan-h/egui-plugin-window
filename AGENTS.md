@@ -20,7 +20,7 @@ stakes record in each project's contract before pricing a case here.
 - **Cheap:** a frame drawn late, a glitch for a frame, a cursor that is wrong
   until the next move.
 - **Unsupported, unprotected:** other hosts, other platforms opening a
-  window, OpenGL.
+  window, OpenGL, Bitwig itself in a fullscreen Space (Yan never runs it).
 
 ## Every change is felt in two plug-ins
 
