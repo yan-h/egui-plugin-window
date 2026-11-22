@@ -218,20 +218,21 @@ Since Patch 22 every pass renders, so no delta can outlive its pass and the forc
 recovery after window occlusion.
 `Renderer::render` now returns whether a frame was actually presented;
 a skipped present (occluded window, outdated/lost surface —
-the wgpu renderer's early-return paths) no longer consumes the repaint request, so rendering retries instead of freezing on the last presented frame (Patch 17 bounds how often once the refusal is not transient).
+a refused acquire in the wgpu renderer) no longer consumes the repaint request, so rendering retries instead of freezing on the last presented frame (Patch 17 bounds how often once the refusal is not transient).
 The new `baseview::WindowEvent::Occluded(false)` (see the baseview patch above) schedules an immediate repaint so the first frame after re-expose is fresh.
-- **Patch 4** (2 sites, `src/renderer/wgpu/renderer.rs` `render`): flush
-staged uploads on the surface-not-available early returns.
+- **Patch 4** (`src/renderer/wgpu/renderer.rs` `render`): flush
+staged uploads when the surface is not available.
 `render` uploads egui's per-frame vertex/index/texture data (via `update_buffers` /`update_texture`, i.e. `queue.write_*`) BEFORE it acquires the surface texture;
 those staging buffers live in wgpu's pending writes and are only reclaimed by a `submit()` (through wgpu-core `pre_submit`).
 The Occluded/Timeout and Suboptimal/Outdated/Lost arms returned WITHOUT submitting, stranding that frame's staging buffers.
 Combined with Patch 3 (a skipped present retried every timer tick, before Patch 17's backoff), a backgrounded plugin window re-ran `render` ~66×/s and accumulated staging buffers into the *gigabytes* within minutes —
 the memory dropped instantly on refocus, when the next presented frame's `submit` finally drained the backlog.
 Fix:
-each early return now submits `user_cmd_bufs` + the upload encoder (no drawable acquired, so nothing presents —
+a refused acquire still submits `user_cmd_bufs` + the upload encoder (no drawable acquired, so nothing presents —
 the window stays frozen while hidden, which is expected —
 but pending writes drain and `maintain` runs every tick, so memory stays flat).
 Root-caused from a 26 GB balloon while tabbed away from Bitwig.
+Since #30 it is the frame's one submission, made with or without a drawable: the drawable decides only whether the window's pass is encoded into it and presented.
 - **Patch 5** (1 site, `src/window.rs` `on_frame`): make delayed repaints
 actually come due.
 The repaint deadline was recomputed as `now + repaint_delay` on *every* tick that painted nothing, and egui rebuilds `repaint_delay` from scratch each pass (reset to `MAX` in `begin_pass_repaint_logic`, then the min of that pass's requests) while the UI closure runs on every tick, painting or not.
@@ -367,9 +368,10 @@ Keyed on the refusals rather than the occlusion event, since wgpu-hal and basevi
 baseview runs no frame for a window it reads as occluded (its patch 9), so an occlusion alone no longer arms the backoff;
 it still covers that disagreement (a surface wgpu-hal reads as occluded in a window baseview reads as visible), repeated acquire timeouts, and a surface that fails to recover.
 Texture deltas need no exemption: every pass renders (Patch 22), so a frame carrying one is never skipped and glyph coordinates never point into a stale atlas.
-The same change also runs `free_textures` on all three render exits instead of only past the acquire:
+The same change also runs `free_textures` on every frame, a refused one included, instead of only past the acquire:
 a `free`-only delta on a bailing frame used to drop egui's texture-manager ids permanently, leaking the retired atlas exactly when the backoff above forces a frame through on the strength of consuming that delta.
-Both halves are drained, the uploads before the acquire and the frees on every exit, since egui 0.37's delta asserts in a debug build that it was applied when dropped;
+It runs once, after the frame's one submission (Patch 4), as egui-wgpu frees (#30): freeing destroys the texture, and the frees used to run before the submit that might still use it.
+Both halves are drained, the uploads before the acquire and the frees after the submit, since egui 0.37's delta asserts in a debug build that it was applied when dropped;
 the one pass that renders nothing, egui closing the root viewport, clears it.
 `pass_due` (Patch 22's, which carries this backoff) and `after_render` are pure functions with their own tests in `egui-baseview`, which `ci.sh` runs.
 - **Patch 18** (`src/window.rs`, `src/translate.rs`): one rule for which keys the editor owns and which go to the host (#1433), shared by both plug-ins.
@@ -485,6 +487,7 @@ The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1
 besides the patches noted above it gives a wheel event `MouseWheelSource::Unknown`, since baseview reports neither what scrolled nor the phase,
 ignores `OutputCommand::TextSelectionSettled`, since macOS has no primary selection,
 and presents through `Queue::present`.
+egui-wgpu 0.35 and 0.37 both free textures after the submit; this fork freed before it until #30 (Patch 17).
 wgpu-hal 30's Metal present path is unchanged from 29's, and its acquire refuses an occluded window as before, so Patches 10, 12 and 17 carry over as they were.
 The `frame-log` feature needs harmonigraph's present observer ported to its wgpu-hal 30 and is unbuilt here.
 The [last comparison](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):

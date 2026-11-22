@@ -635,19 +635,15 @@ impl Renderer {
         let _ = occluded;
     }
 
-    /// Apply the `free` half of egui's texture delta.
+    /// Apply the `free` half of egui's texture delta, after the frame's one
+    /// submission, as egui-wgpu does: freeing destroys the texture, and
+    /// destroying one a submission not yet made still uses invalidates it.
     ///
-    /// Every exit from `render` has to run it, including the ones that bail
-    /// before the pass. `TexturesDelta` is DRAINED out of egui's texture
-    /// manager once per pass, so a frame that drops the list is the last
-    /// mention those ids ever get and their textures stay allocated for the
-    /// life of the window. The `set` half is already uploaded before the
-    /// acquire for the same reason; this is the other half of it.
-    ///
-    /// Safe on a bailing frame precisely because it drew nothing — egui only
-    /// lists a texture here once no primitive references it, and a texture
-    /// still in flight from an earlier submit is kept alive by wgpu's own
-    /// refcount rather than by this handle.
+    /// Every frame `render` is called for runs it, a refused surface's
+    /// included. `TexturesDelta` is DRAINED out of egui's texture manager once
+    /// per pass, so a frame that drops the list is the last mention those ids
+    /// ever get and their textures stay allocated for the life of the window.
+    /// The `set` half is uploaded before the acquire for the same reason.
     fn free_textures(&self, full_output: &mut FullOutput) {
         if full_output.textures_delta.free.is_empty() {
             return;
@@ -807,6 +803,7 @@ impl Renderer {
         }
 
         let mut recreate_surface = false;
+        let mut reconfigure = false;
         self.last_upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
 
         // Before the acquire, not after: the layer's `presentsWithTransaction`
@@ -825,27 +822,9 @@ impl Renderer {
         self.last_acquire_ms = acquire_start.elapsed().as_secs_f32() * 1000.0;
         let output_frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
-                // Flush this frame's staged uploads before bailing. The
-                // update_texture/update_buffers calls above already pushed
-                // egui's per-frame vertex, index and texture data into the
-                // queue's pending writes, and those staging buffers are only
-                // reclaimed by a submit() (via wgpu-core's pre_submit). Returning
-                // without submitting strands them: a window whose surface
-                // reports Occluded/Timeout on every frame (baseview runs none
-                // for a window it reads as occluded, but wgpu-hal reads a
-                // different one) piles up staging buffers at the frame rate —
-                // gigabytes within minutes — freed only when the next presented
-                // frame's submit drains the whole backlog at once. No drawable
-                // was acquired, so this submits the uploads without presenting;
-                // the window stays frozen but flat.
-                self.free_textures(full_output);
-                self.render_state
-                    .queue
-                    .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
-                return false;
-            }
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
             wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
+                reconfigure = true;
                 None
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -853,9 +832,89 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 recreate_surface = true;
+                reconfigure = true;
                 None
             }
         };
+
+        // The window's frame is encoded only into a drawable; everything else
+        // this frame staged is submitted either way.
+        if let Some(output_frame) = &output_frame {
+            {
+                let renderer = self.render_state.renderer.read();
+                let frame_view = output_frame
+                    .texture
+                    .create_view(&TextureViewDescriptor::default());
+
+                let (view, resolve_target) = if let Some(msaa_view) = &self.msaa_texture_view {
+                    (msaa_view, Some(&frame_view))
+                } else {
+                    (&frame_view, None)
+                };
+
+                let encode_start = std::time::Instant::now();
+                let render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("egui_render"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target,
+                        ops: egui_wgpu::wgpu::Operations {
+                            load: egui_wgpu::wgpu::LoadOp::Clear(Color {
+                                r: bg_color[0] as f64,
+                                g: bg_color[1] as f64,
+                                b: bg_color[2] as f64,
+                                a: bg_color[3] as f64,
+                            }),
+                            store: egui_wgpu::wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: timing.then(|| RenderPassTimestampWrites {
+                        query_set: &self.gpu_timer.as_ref().expect("timing implies a timer").set,
+                        beginning_of_pass_write_index: None,
+                        end_of_pass_write_index: Some(1),
+                    }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                // Forgetting the pass' lifetime means that we are no longer compile-time protected from
+                // runtime errors caused by accessing the parent encoder before the render pass is dropped.
+                // Since we don't pass it on to the renderer, we should be perfectly safe against this mistake here!
+                renderer.render(
+                    &mut render_pass.forget_lifetime(),
+                    &clipped_primitives,
+                    &screen_descriptor,
+                );
+                self.last_encode_ms = encode_start.elapsed().as_secs_f32() * 1000.0;
+            }
+
+            if timing {
+                if let Some(timer) = self.gpu_timer.as_mut() {
+                    timer.close();
+                }
+            }
+        }
+
+        // One submission, drawable or not: the staged uploads, the paint
+        // callbacks' command buffers and, with a drawable, the frame.
+        //
+        // Submitted on a refused surface too, which presents nothing. The
+        // update_texture/update_buffers calls above already pushed egui's
+        // per-frame vertex, index and texture data into the queue's pending
+        // writes, and those staging buffers are only reclaimed by a submit()
+        // (via wgpu-core's pre_submit). Skipping it strands them: a window whose
+        // surface reports Occluded/Timeout on every frame (baseview runs none
+        // for a window it reads as occluded, but wgpu-hal reads a different one)
+        // piles up staging buffers at the frame rate — gigabytes within minutes
+        // — freed only when the next presented frame's submit drains the whole
+        // backlog at once. The window stays frozen but flat.
+        let submit_start = std::time::Instant::now();
+        self.render_state
+            .queue
+            .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
+        self.free_textures(full_output);
 
         let Some(output_frame) = output_frame else {
             if recreate_surface {
@@ -875,82 +934,11 @@ impl Renderer {
                     self.layer_present.renew(&self.surface);
                 }
             }
-
-            self.configure_surface(self.width, self.height);
-            // Same staged-upload reclamation as the Occluded/Timeout arm above:
-            // flush so pending writes don't accumulate across frames while the
-            // surface stays unavailable (Suboptimal/Outdated/Lost).
-            self.free_textures(full_output);
-            self.render_state
-                .queue
-                .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
+            if reconfigure {
+                self.configure_surface(self.width, self.height);
+            }
             return false;
         };
-
-        {
-            let renderer = self.render_state.renderer.read();
-            let frame_view = output_frame
-                .texture
-                .create_view(&TextureViewDescriptor::default());
-
-            let (view, resolve_target) = if let Some(msaa_view) = &self.msaa_texture_view {
-                (msaa_view, Some(&frame_view))
-            } else {
-                (&frame_view, None)
-            };
-
-            let encode_start = std::time::Instant::now();
-            let render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("egui_render"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target,
-                    ops: egui_wgpu::wgpu::Operations {
-                        load: egui_wgpu::wgpu::LoadOp::Clear(Color {
-                            r: bg_color[0] as f64,
-                            g: bg_color[1] as f64,
-                            b: bg_color[2] as f64,
-                            a: bg_color[3] as f64,
-                        }),
-                        store: egui_wgpu::wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: timing.then(|| RenderPassTimestampWrites {
-                    query_set: &self.gpu_timer.as_ref().expect("timing implies a timer").set,
-                    beginning_of_pass_write_index: None,
-                    end_of_pass_write_index: Some(1),
-                }),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            // Forgetting the pass' lifetime means that we are no longer compile-time protected from
-            // runtime errors caused by accessing the parent encoder before the render pass is dropped.
-            // Since we don't pass it on to the renderer, we should be perfectly safe against this mistake here!
-            renderer.render(
-                &mut render_pass.forget_lifetime(),
-                &clipped_primitives,
-                &screen_descriptor,
-            );
-            self.last_encode_ms = encode_start.elapsed().as_secs_f32() * 1000.0;
-        }
-
-        if timing {
-            if let Some(timer) = self.gpu_timer.as_mut() {
-                timer.close();
-            }
-        }
-
-        self.free_textures(full_output);
-
-        let submit_start = std::time::Instant::now();
-        let encoded = encoder.finish();
-
-        self.render_state
-            .queue
-            .submit(user_cmd_bufs.into_iter().chain([encoded]));
 
         // A drawable is in hand and the present is the next statement, so a
         // layer hidden while the window was occluded comes back here — with
