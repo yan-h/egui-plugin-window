@@ -57,17 +57,13 @@ path = "src/lib.rs"
 version = "0.1.4"
 path = "../baseview"
 
-[dependencies.copypasta]
-version = "0.10"
-default-features = false
-
 [dependencies.egui]
-version = "0.35.0"
+version = "0.37.0"
 features = ["bytemuck"]
 default-features = false
 
 [dependencies.egui-wgpu]
-version = "0.35.0"
+version = "0.37.0"
 optional = true
 
 [dependencies.keyboard-types]
@@ -82,7 +78,7 @@ optional = true
 version = "5.3.3"
 
 [dependencies.pollster]
-version = "0.4.0"
+version = "1.0"
 optional = true
 
 [dependencies.raw-window-handle]
@@ -98,10 +94,10 @@ version = "0.1"
 optional = true
 
 [dependencies.wgpu]
-version = "29"
+version = "30"
 optional = true
 
-# The same objc2 generation wgpu-hal 29 builds against, so the
+# The same objc2 generation wgpu-hal 30 builds against, so the
 # `Retained<CAMetalLayer>` pulled out of `Surface::as_hal` in the wgpu
 # renderer is the same type on both sides. Only used on macOS with the
 # `wgpu` feature (src/renderer/wgpu/renderer.rs, `layer_present`).
@@ -142,5 +138,5 @@ version = "0.6"
 optional = true
 
 [dev-dependencies.egui]
-version = "0.35.0"
+version = "0.37.0"
 features = ["default_fonts"]

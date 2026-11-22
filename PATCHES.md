@@ -151,7 +151,7 @@ harmonigraph ends an open host parameter gesture from a pass, and one begun just
 "Seen" is patch 9's frame test, `is_visible`, with one owner: `check_seen` asks it, keeps the answer in `seen`, and tells the app when it turns from seen to not seen.
 It is asked at every event that can change it: the occlusion notification, `viewDidHide` and `viewDidUnhide` (new `ViewImpl` methods, sent for an ancestor too), a move to another window or to none, and the frame gate on every link callback the frame divisor lets through, which repairs a lost notification up to `divisor` refreshes late while the link fires.
 Never at open (`seen` starts false and the open samples it), never on a reveal, never twice for one loss, and not once the window is closed, whose own removal from its window would otherwise read as one.
-It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame`, `trigger_event` or `trigger_deferrable_event` lets go, so the app may call its host, whatever the host does to this window in return.
+It is never called inside the window handler's borrow: a loss found while a frame or an event holds it (`pay_unseen` finds the borrow taken) is owed in `unseen_owed` and paid as `trigger_frame` or `trigger_event` lets go, so the app may call its host, whatever the host does to this window in return.
 A loss found and undone within one borrow (the view taken out of a window and put back in a visible one during a frame) is still told, and nothing is told once the window is closed, a loss owed from inside the closing borrow included.
 `pay_unseen` calls a clone of the notice, so a host destroying the editor from inside the call cannot free the closure while it runs.
 Otherwise it runs synchronously inside AppKit's own hide and move callbacks, so it can arrive inside the app's own calls that hide the view or move it between windows: a view moved into a window not yet on screen reads as not seen, so a plug-in moving its editor into a window of its own is told at the move.
@@ -161,7 +161,7 @@ No notice set, nothing changes; otonal sets none.
 The `testing` feature (native tests only; no plug-in enables it) lets a test set what a window's occlusion state reads as (`baseview::testing::set_window_shows`), since a window reads as visible only once the window server says so, which a test process may never see.
 `tests/unseen_notice.rs` (no harness, as `host_keys.rs`), which `ci.sh` runs with that feature, checks one call each for the view hidden, an ancestor hidden, the window occluded by notification, the window occluded with the notification lost and the next link callback finding it, and the view taken out of its window;
 none at open, on a reveal, on a move back, for a repeat, or at close;
-and that a loss found inside a frame, inside an event `trigger_event` delivers and inside one `trigger_deferrable_event` delivers is told after each lets go, by a notice that sends the view an event through `trigger_event`, whose infallible borrow would panic inside the handler's.
+and that a loss found inside a frame, inside a pointer event and inside the keyboard's loss is told after each lets go, by a handler that records a notice arriving while it runs.
 - **Patch 12** (`src/platform/macos/view.rs`, `tests/unseen_notice.rs`): one reading of whether the view can be seen (#15).
 `check_seen` asks patch 9's `is_visible` and keeps the answer, `seen`, which patch 11's notice already read;
 the handler's `Occluded` is now told from it, on a change and on every answer for a window just attached to, in place of patch 3's second reading of the window alone (`window_visible`, `report_window_occlusion`).
@@ -169,6 +169,21 @@ A gain runs patch 3's reveal frame where the event that found it asks: the occlu
 So a view hidden inside a visible window is told `Occluded(true)` too, and its renderer hides its layer then and draws the reveal frame at un-hide;
 a frame gate that finds a change a lost notification never reported tells it as well, rather than leaving `Occluded` stale;
 and a view taken out of its window is told `Occluded(true)` as it leaves.
+- **Patch 13** (`src/platform/macos/view.rs`, `tests/reentrant_events.rs`, `tests/unseen_notice.rs`, `Cargo.toml`): an event delivered inside the handler's borrow is queued, never a panic.
+Upstream's `trigger_event` borrowed the handler infallibly, so an event AppKit delivered from inside a call the handler made (a frame or an event running) panicked in Bitwig's process;
+only window events went through `trigger_deferrable_event`, which queued them.
+Now every event goes through `trigger_event`, which queues it when the borrow is taken and answers `Ignored`, and `trigger_deferrable_event` is gone.
+The queue holds events only while a borrow is held, since `trigger_event` and `trigger_frame` each drain it before letting go and an event arriving during the drain joins its end,
+so a queued event reaches the handler in the order it arrived, ahead of any event after the borrow ends.
+`Ignored` is the answer that loses nothing: a queued key goes to the host, so the host never misses a release, and a queued drop is refused.
+Unprotected: a queued key press the editor would have owned acts in both the editor and the host (egui-baseview's Patch 18 keeps one keystroke in one place only for keys answered in time).
+`tests/reentrant_events.rs` (no harness) sends keys to the view from inside the handler's own key event and checks their order and that they reached the host;
+`tests/unseen_notice.rs`, whose notice used to detect a call inside the borrow by that panic, now has the handler record one instead.
+- **Patch 14** (`src/clipboard.rs`, `src/platform/macos/window.rs`, `src/platform/none.rs`, `Cargo.toml`): `clipboard_text` reads the general pasteboard, beside upstream's `copy_to_clipboard`, for egui-baseview's paste and copy (its Patch 31).
+It reads plain text only, Yan's choice (2026-11-21): a file copied in Finder pastes whatever plain text Finder put beside it, if any, where copypasta pasted the file's path; off macOS it reads none.
+Both look the pasteboard up as an optional (`general_pasteboard`), since objc2's `generalPasteboard` is declared non-null and a restricted process can be refused one: with none, a paste reads nothing and a copy writes nothing.
+`copy_to_clipboard` clears and then writes the text with `writeObjects:`, which declares its own type, where upstream called `setString:forType:`, documented only against a declared type;
+it returns whether the write landed.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -177,18 +192,18 @@ Patch 7 (#1692's re-pace of a changed divisor, with `FrameTiming::woken`) was re
 a divisor set from a frame takes effect after the one frame the link has already scheduled.
 baseview 0.4 drives frames from a display link too, but pauses it while idle and has no divisor, visibility test or frame timing.
 Take from a newer baseview only the macOS changes wanted,
-keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see with its unseen notice, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, and the no-window platform off macOS.
+keeping the cursor-rect ownership patch, the occlusion-event patch with its per-attachment sampling, the display link in common modes with its divisor and frame timing, no frame for a view nobody can see with its unseen notice, the withheld pointer exit, positioned button events, the synthesized release for a stuck button, the host's unhandled keys, events queued inside the handler's borrow, the pasteboard read, and the no-window platform off macOS.
 - **Upstreaming**: declined (2026-07-19).
 Kept as a local patch rather than proposed upstream.
 
 ## egui-baseview
 
 - **Upstream base**: `egui-baseview 0.3.0` from crates.io (the RustAudio
-fork used by nice-plug).
-- **Pruned to the wgpu renderer on macOS** (#1810): the OpenGL renderer and its `opengl` feature, the `x11` features of copypasta and egui-wgpu, the examples and the upstream CI workflow are gone.
+fork used by nice-plug), ported to egui and egui-wgpu 0.37 and wgpu 30 (see "Upgrade").
+- **Pruned to the wgpu renderer on macOS** (#1810): the OpenGL renderer and its `opengl` feature, the `x11` feature of egui-wgpu, the examples and the upstream CI workflow are gone.
 The conditions constant on macOS are folded:
 cut, copy and paste take Cmd alone, and the modifier translation and the wheel's flip take their macOS branches.
-Off macOS the clipboard is copypasta's no-op context, since no window opens there.
+The clipboard is baseview's (Patch 31).
 - **Patch 1** (1 call site, `src/window.rs` `on_frame`): the window resize that follows a physical-size change passed physical pixels to `Window::resize()`, which takes logical points —
 on scaled displays the window/view ended up `pixels_per_point` times too large (2x-zoomed, bottom-left-anchored content on Retina).
 Convert with `logical_size_for`, at the native scale. The build path's site went with `Queue::resize` (Patch 29).
@@ -203,20 +218,21 @@ Since Patch 22 every pass renders, so no delta can outlive its pass and the forc
 recovery after window occlusion.
 `Renderer::render` now returns whether a frame was actually presented;
 a skipped present (occluded window, outdated/lost surface —
-the wgpu renderer's early-return paths) no longer consumes the repaint request, so rendering retries instead of freezing on the last presented frame (Patch 17 bounds how often once the refusal is not transient).
+a refused acquire in the wgpu renderer) no longer consumes the repaint request, so rendering retries instead of freezing on the last presented frame (Patch 17 bounds how often once the refusal is not transient).
 The new `baseview::WindowEvent::Occluded(false)` (see the baseview patch above) schedules an immediate repaint so the first frame after re-expose is fresh.
-- **Patch 4** (2 sites, `src/renderer/wgpu/renderer.rs` `render`): flush
-staged uploads on the surface-not-available early returns.
+- **Patch 4** (`src/renderer/wgpu/renderer.rs` `render`): flush
+staged uploads when the surface is not available.
 `render` uploads egui's per-frame vertex/index/texture data (via `update_buffers` /`update_texture`, i.e. `queue.write_*`) BEFORE it acquires the surface texture;
 those staging buffers live in wgpu's pending writes and are only reclaimed by a `submit()` (through wgpu-core `pre_submit`).
 The Occluded/Timeout and Suboptimal/Outdated/Lost arms returned WITHOUT submitting, stranding that frame's staging buffers.
 Combined with Patch 3 (a skipped present retried every timer tick, before Patch 17's backoff), a backgrounded plugin window re-ran `render` ~66×/s and accumulated staging buffers into the *gigabytes* within minutes —
 the memory dropped instantly on refocus, when the next presented frame's `submit` finally drained the backlog.
 Fix:
-each early return now submits `user_cmd_bufs` + the upload encoder (no drawable acquired, so nothing presents —
+a refused acquire still submits `user_cmd_bufs` + the upload encoder (no drawable acquired, so nothing presents —
 the window stays frozen while hidden, which is expected —
 but pending writes drain and `maintain` runs every tick, so memory stays flat).
 Root-caused from a 26 GB balloon while tabbed away from Bitwig.
+Since #30 it is the frame's one submission, made with or without a drawable: the drawable decides only whether the window's pass is encoded into it and presented.
 - **Patch 5** (1 site, `src/window.rs` `on_frame`): make delayed repaints
 actually come due.
 The repaint deadline was recomputed as `now + repaint_delay` on *every* tick that painted nothing, and egui rebuilds `repaint_delay` from scratch each pass (reset to `MAX` in `begin_pass_repaint_logic`, then the min of that pass's requests) while the UI closure runs on every tick, painting or not.
@@ -259,6 +275,7 @@ the new pair measured 0 of 60 reversed on Metal.
 Queue-staged uploads and callback-owned command buffers stay outside it.
 Readback is a four-step cycle polled with `PollType::Poll`, never `Wait` —
 blocking for the number would stall the pipeline being measured.
+A mapped range wgpu refuses to hand out is dropped as a failed map is: a fresh staging buffer and no reading.
 The resolve waits for `on_submitted_work_done` and goes in its own submission:
 resolved with the frame, an M5 Pro under macOS 27 read the closing slot before its stamp landed on 98 of 100 frames,
 and the slot kept the last frame's value, so nearly every pair came out reversed and was dropped.
@@ -341,6 +358,8 @@ every settings `ScrollArea` stopped, while the pictures, which also read `zoom_d
 That is the symptom of #501's stranded drag with no drag at all, so `end_stranded_drag` had nothing to end and the Console stayed silent.
 Mouse and key events now both replace all five fields with the event's own set, Cmd as `mac_cmd` and `command` on macOS;
 upstream egui-baseview 0.7 already has this shape.
+Since egui 0.37 keeps its modifiers in its input state and changes them only by `Event::ModifiersChanged`, the set goes to egui as that event, queued ahead of the event carrying it whenever it differs from what egui holds (`queue_modifiers`);
+the window keeps what egui holds in its own field, which a focus loss clears as egui does (Patch 25).
 - **Patch 17** (`src/window.rs`): stop drawing frames for a surface that
 keeps refusing to present (#989).
 A present refused three times in a row (`REFUSALS_BEFORE_BACKOFF`) is offered another only every 250 ms (`SURFACE_RETRY`) instead of every frame, because an occluded window's acquire is refused rather than waited on, and drawing anyway submitted 60-144 unpresented frames a second against 13-37 ms of GPU work with nothing pacing them —
@@ -349,8 +368,11 @@ Keyed on the refusals rather than the occlusion event, since wgpu-hal and basevi
 baseview runs no frame for a window it reads as occluded (its patch 9), so an occlusion alone no longer arms the backoff;
 it still covers that disagreement (a surface wgpu-hal reads as occluded in a window baseview reads as visible), repeated acquire timeouts, and a surface that fails to recover.
 Texture deltas need no exemption: every pass renders (Patch 22), so a frame carrying one is never skipped and glyph coordinates never point into a stale atlas.
-The same change also runs `free_textures` on all three render exits instead of only past the acquire:
+The same change also runs `free_textures` on every frame, a refused one included, instead of only past the acquire:
 a `free`-only delta on a bailing frame used to drop egui's texture-manager ids permanently, leaking the retired atlas exactly when the backoff above forces a frame through on the strength of consuming that delta.
+It runs once, after the frame's one submission (Patch 4), as egui-wgpu frees (#30): freeing destroys the texture, and the frees used to run before the submit that might still use it.
+Both halves are drained, the uploads before the acquire and the frees after the submit, since egui 0.37's delta asserts in a debug build that it was applied when dropped;
+the one pass that renders nothing, egui closing the root viewport, clears it.
 `pass_due` (Patch 22's, which carries this backoff) and `after_render` are pure functions with their own tests in `egui-baseview`, which `ci.sh` runs.
 - **Patch 18** (`src/window.rs`, `src/translate.rs`): one rule for which keys the editor owns and which go to the host (#1433), shared by both plug-ins.
 Every key reaches the editor first, and `owns_key` decides from the state the last egui pass left;
@@ -366,8 +388,9 @@ and bare Escape, which clears that selection (#1674);
 the arrows and Cmd-A, which move it, stay the host's, since a stray click on a label would otherwise take the arrows from the DAW.
 A focused text field (`Context::text_edit_focused`, which a `DragValue` being typed into counts as) owns typing and TextEdit's editing keys (`text_edit_owns_key`),
 and a listed shortcut it does not use goes to the host.
-That table mirrors egui 0.35's TextEdit event handling, `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs` and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs`,
+That table mirrors egui 0.37's TextEdit event handling, `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs` and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs`,
 so an egui upgrade re-derives it from them.
+Re-derived for 0.37: the key arms are unchanged from 0.35, and a field's completion popup (`widgets/text_edit/completion.rs`, new) reads only the bare arrows, Enter, Tab and Escape, which the table already owns.
 Its clipboard chords are any Command chord on C, X or V, as both forks read them.
 With no text field focused, the editor owns exactly the shortcuts the app lists with `Queue::set_shortcuts`, matched exactly,
 so the editor's undo and redo never reach the DAW while the editor window has the keyboard.
@@ -436,6 +459,8 @@ egui's keyboard zoom (Cmd-plus, Cmd-equals, Cmd-minus) never fires, since neithe
 and Cmd-0, which egui reads as a reset to 1, reaches egui only where a plug-in lists it as a shortcut (Patch 18), and otherwise goes to the host alone.
 - **Patch 25** (`src/window.rs`; from otonal's fork): a focus change also sets `RawInput::focused` (`update_focus_input`), beside the viewport's `focused` and the `WindowFocused` event.
 egui's input state reads that field, and ends a pane drag on focus loss by it.
+The focus-lost event also clears egui's held keys and modifiers, so it clears the window's record of them (Patch 16):
+otherwise a Cmd still down when the window comes back reads as up in egui until it changes, since nothing would resend it.
 - **Patch 26** (`src/translate.rs`, `src/window.rs`; from otonal's fork): a key whose logical value names no egui key falls back to the physical key it sits on (`translate_key`), as egui-winit does.
 AppKit reports ⌥A as the "å" it types, so without it ⌥A reached egui as no key and matched no listed shortcut.
 Both the key event egui is sent and the shortcut match use it.
@@ -450,9 +475,23 @@ neither plug-in called the one or sent the other, and each was a second size wri
 The window opens at the size its settings give, clamped to the device's limit.
 - **Patch 30** (`Cargo.toml`): `baseview` by path (#9), so a project's pin of `egui-baseview` brings the `baseview` from the same commit,
 and a project that names `baseview` at another commit builds two, whose types do not meet, rather than pairing two commits that may not agree.
+- **Patch 31** (`src/window.rs`, `Cargo.toml`): the clipboard through baseview, not copypasta.
+egui's copy goes to `baseview::copy_to_clipboard` and a paste reads `baseview::clipboard_text` (baseview's Patch 14), both on objc2-app-kit 0.3, which baseview already builds;
+copypasta pulled a second objc2 generation (objc2 0.5, objc2-app-kit and objc2-foundation 0.2) into both plug-ins.
+Plain text is all egui copies or pastes. A copy the pasteboard refuses is logged, as copypasta's error was; the paste error log and the clipboard's failed-open path are gone,
+and an empty pasteboard pastes nothing, as before, and a copied file no longer pastes as its path (baseview's Patch 14). Off macOS baseview's stub reads none, as copypasta's no-op context did.
+`queue_key` takes the paste as a function, so its tests never read the real pasteboard.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
-The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
+The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1.0, toolchain 1.99.1) kept both bases and needed no baseview change;
+besides the patches noted above it gives a wheel event `MouseWheelSource::Unknown`, since baseview reports neither what scrolled nor the phase,
+ignores `OutputCommand::TextSelectionSettled`, since macOS has no primary selection,
+and presents through `Queue::present`.
+wgpu-hal 30 tags the Metal layer's colour space as sRGB, so both editors are now colour-managed sRGB: a visible change Yan accepted on 2026-11-21.
+egui-wgpu 0.35 and 0.37 both free textures after the submit; this fork freed before it until #30 (Patch 17).
+wgpu-hal 30's Metal present path is unchanged from 29's, and its acquire refuses an occluded window as before, so Patches 10, 12 and 17 carry over as they were.
+The `frame-log` feature needs harmonigraph's present observer ported to its wgpu-hal 30 and is unbuilt here.
+The [last comparison](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
 its disposition table stops at Patch 17, so dispose of later patches from their entries here.
 The egui 0.36 publication trigger is met and investigated,
 and egui-baseview 0.9.0 has been re-evaluated since (#1529);

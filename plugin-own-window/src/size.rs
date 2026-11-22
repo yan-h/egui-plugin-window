@@ -122,37 +122,34 @@ impl NativeResize {
         // A queued request can install directly once closed. A proposal
         // already dequeued for negotiation is absent here and invalidated by
         // the lifetime.
-        let _ = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                Some(if word & PENDING != 0 {
+        self.state
+            .update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                if word & PENDING != 0 {
                     (word >> 30) & SIZE_MASK
                 } else {
                     word & SIZE_MASK
-                })
+                }
             });
     }
 
     fn restore(&self, size: (u32, u32)) {
         let size = encode_size(size);
-        let _ = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                Some(if word & OPEN == 0 {
+        self.state
+            .update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                if word & OPEN == 0 {
                     size
                 } else {
                     (word & !(REQUEST_MASK | PENDING)) | (size << 30) | PENDING
-                })
+                }
             });
     }
 
     fn accept(&self, size: (u32, u32)) {
         self.host_revision.fetch_add(1, Ordering::AcqRel);
         self.in_flight.store(0, Ordering::Release);
-        let _ = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                Some((word & !SIZE_MASK) | encode_size(size))
+        self.state
+            .update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                (word & !SIZE_MASK) | encode_size(size)
             });
     }
 
@@ -196,10 +193,9 @@ impl NativeResize {
             }
             let host_changed = self.host_revision.load(Ordering::Acquire) != revision;
             if accepted && !host_changed {
-                let _ = self
-                    .state
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                        Some((word & !SIZE_MASK) | encode_size(proposed))
+                self.state
+                    .update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                        (word & !SIZE_MASK) | encode_size(proposed)
                     });
             }
         }

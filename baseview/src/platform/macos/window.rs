@@ -1,13 +1,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use objc2::rc::{autoreleasepool, Weak};
-use objc2::runtime::NSObjectProtocol;
-use objc2::MainThreadMarker;
+use objc2::rc::{autoreleasepool, Retained, Weak};
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::{msg_send, ClassType, MainThreadMarker};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardTypeString,
 };
-use objc2_foundation::NSString;
+use objc2_foundation::{NSArray, NSString};
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, HasRawDisplayHandle, HasRawWindowHandle,
     RawDisplayHandle, RawWindowHandle,
@@ -215,10 +215,28 @@ unsafe impl<'a> HasRawDisplayHandle for Window<'a> {
     }
 }
 
-pub fn copy_to_clipboard(string: &str) {
-    let pb = NSPasteboard::generalPasteboard();
-    let ns_str = NSString::from_str(string);
+/// The general pasteboard, or none where the process is refused one. Asked
+/// as an optional rather than through objc2's `generalPasteboard`, which is
+/// declared non-null and would panic in the host on a nil.
+fn general_pasteboard() -> Option<Retained<NSPasteboard>> {
+    unsafe { msg_send![NSPasteboard::class(), generalPasteboard] }
+}
 
-    pb.clearContents();
-    pb.setString_forType(&ns_str, unsafe { NSPasteboardTypeString });
+/// Whether the text was written. Cleared and then written as an object,
+/// `writeObjects:`, which declares its own types: `setString:forType:` is
+/// documented only against types already declared.
+pub fn copy_to_clipboard(string: &str) -> bool {
+    autoreleasepool(|_| {
+        let Some(pb) = general_pasteboard() else { return false };
+        let text = ProtocolObject::from_retained(NSString::from_str(string));
+        pb.clearContents();
+        pb.writeObjects(&NSArray::from_retained_slice(&[text]))
+    })
+}
+
+pub fn clipboard_text() -> Option<String> {
+    autoreleasepool(|_| {
+        let text = general_pasteboard()?.stringForType(unsafe { NSPasteboardTypeString })?;
+        Some(text.to_string())
+    })
 }

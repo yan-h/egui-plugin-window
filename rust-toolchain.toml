@@ -1,6 +1,7 @@
-# The older of the two projects' pins (otonal's; harmonigraph's is newer), so
-# what passes here builds in both. A project builds these crates with its own
-# toolchain, whatever this says.
+# egui and egui-wgpu 0.37 declare Rust 1.95, and plugin-own-window's atomic
+# `update` is stable only after 1.92; a project pinning these crates needs a
+# toolchain that has both. A project builds them with its own toolchain,
+# whatever this says.
 [toolchain]
-channel = "1.92"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

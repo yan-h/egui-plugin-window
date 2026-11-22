@@ -6,19 +6,11 @@ use baseview::{
     Event, EventStatus, PhySize, Size, Window, WindowHandle, WindowHandler, WindowInfo,
     WindowOpenOptions, WindowScalePolicy,
 };
-use copypasta::ClipboardProvider;
 use egui::{Pos2, Rect, Rgba, ViewportCommand, pos2, vec2};
 use keyboard_types::Modifiers;
 use raw_window_handle::HasRawWindowHandle;
 
 use crate::{GraphicsConfig, renderer::Renderer};
-
-/// copypasta's native clipboard, which off macOS would need its `x11`
-/// feature; there baseview opens no window, so copypasta's no-op one stands in.
-#[cfg(target_os = "macos")]
-type Clipboard = copypasta::ClipboardContext;
-#[cfg(not(target_os = "macos"))]
-type Clipboard = copypasta::nop_clipboard::NopClipboardContext;
 
 #[cfg(feature = "nice-log")]
 use nice_plug_core::{nice_error as error, nice_warn as warn};
@@ -390,11 +382,13 @@ where
     /// The last time handed to egui, which a frame never goes back past.
     egui_time: f64,
     egui_input: egui::RawInput,
+    /// The modifiers egui holds once it has read `egui_input`'s events: the
+    /// set the last `ModifiersChanged` sent, or none after a focus loss
+    /// (`queue_modifiers`).
+    modifiers: egui::Modifiers,
     current_cursor_icon: baseview::MouseCursor,
 
     renderer: Renderer,
-
-    clipboard_ctx: Option<Clipboard>,
 
     surface_size: SurfaceSize,
     /// See [`SizeSource`]: polled at the top of every frame, before the input
@@ -545,14 +539,6 @@ where
         // clamped where a size from elsewhere would be refused.
         let surface_size = SurfaceSize::clamped(initial_size, renderer.max_texture_side());
 
-        let clipboard_ctx = match Clipboard::new() {
-            Ok(clipboard_ctx) => Some(clipboard_ctx),
-            Err(e) => {
-                error!("Failed to initialize clipboard: {}", e);
-                None
-            }
-        };
-
         let start_time = Instant::now();
 
         Self {
@@ -564,11 +550,10 @@ where
             start_time,
             egui_time: 0.0,
             egui_input,
+            modifiers: egui::Modifiers::NONE,
             current_cursor_icon: baseview::MouseCursor::Default,
 
             renderer,
-
-            clipboard_ctx,
 
             surface_size,
             size_source: settings.size_source.clone(),
@@ -662,11 +647,11 @@ where
         )
     }
 
-    /// Replace the pressed key modifiers with the set an event has sent, all of
-    /// them — see `translate_modifiers` for why a partial update leaves the
-    /// wheel dead.
-    fn update_modifiers(&mut self, modifiers: &Modifiers) {
-        self.egui_input.modifiers = crate::translate::translate_modifiers(*modifiers);
+    /// Hand egui the set of modifiers an event carries, all of them — see
+    /// `translate_modifiers` for why a partial update leaves the wheel dead —
+    /// and return it for the event's own `modifiers`.
+    fn update_modifiers(&mut self, modifiers: &Modifiers) -> egui::Modifiers {
+        queue_modifiers(&mut self.modifiers, &mut self.egui_input.events, *modifiers)
     }
 }
 
@@ -1158,7 +1143,9 @@ where
         // in a member field.
 
         let Some(viewport_output) = full_output.viewport_output.get(&self.viewport_id) else {
-            // The main window was closed by egui.
+            // The main window was closed by egui. Its textures go with the
+            // renderer, and egui's delta asserts it was applied when dropped.
+            full_output.textures_delta.clear();
             window.close();
             return;
         };
@@ -1231,12 +1218,12 @@ where
         for command in full_output.platform_output.commands {
             match command {
                 egui::OutputCommand::CopyText(text) => {
-                    if let Some(clipboard_ctx) = &mut self.clipboard_ctx
-                        && let Err(err) = clipboard_ctx.set_contents(text)
-                    {
-                        error!("Copy/Cut error: {}", err);
+                    if !baseview::copy_to_clipboard(&text) {
+                        error!("Copy/Cut error: the pasteboard refused the text");
                     }
                 }
+                // macOS has no primary selection to put it in.
+                egui::OutputCommand::TextSelectionSettled(_) => {}
                 egui::OutputCommand::CopyImage(_) => {
                     warn!("Copying images is not supported in egui_baseview.");
                 }
@@ -1317,7 +1304,7 @@ where
                     position,
                     modifiers,
                 } => {
-                    self.update_modifiers(modifiers);
+                    let modifiers = self.update_modifiers(modifiers);
 
                     let pressed = matches!(event, baseview::MouseEvent::ButtonPressed { .. });
                     push_pointer_button(
@@ -1326,24 +1313,25 @@ where
                         self.egui_ctx.zoom_factor(),
                         *button,
                         pressed,
-                        self.egui_input.modifiers,
+                        modifiers,
                     );
                 }
                 baseview::MouseEvent::WheelScrolled {
                     delta: scroll_delta,
                     modifiers,
                 } => {
-                    self.update_modifiers(modifiers);
+                    let modifiers = self.update_modifiers(modifiers);
 
                     let (unit, delta) = scroll_in_points(scroll_delta, self.egui_ctx.zoom_factor());
-                    let shift = self.egui_input.modifiers.shift;
-                    let delta = wheel_delta(delta, shift);
+                    let delta = wheel_delta(delta, modifiers.shift);
 
+                    // baseview reports neither the phase nor what scrolled.
                     self.egui_input.events.push(egui::Event::MouseWheel {
                         unit,
                         delta,
-                        modifiers: self.egui_input.modifiers,
+                        modifiers,
                         phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
                     });
                 }
                 baseview::MouseEvent::CursorLeft => {
@@ -1355,13 +1343,12 @@ where
                 // The set the event carries rather than a toggle per modifier
                 // key, as for mouse events: a key-up that went to another
                 // window is corrected by the next event of either kind.
-                self.update_modifiers(&event.modifiers);
-                let modifiers = self.egui_input.modifiers;
+                let modifiers = self.update_modifiers(&event.modifiers);
                 // Whose key this is, decided once: the host's answer and what
                 // egui is sent both follow it.
                 let owned = owns_key(&self.egui_ctx, &self.shortcuts, modifiers, event);
-                let clipboard = self.clipboard_ctx.as_mut();
-                queue_key(&mut self.egui_input.events, event, modifiers, owned, clipboard);
+                let paste = baseview::clipboard_text;
+                queue_key(&mut self.egui_input.events, event, modifiers, owned, paste);
                 return if owned { EventStatus::Captured } else { EventStatus::Ignored };
             }
             baseview::Event::Window(event) => match event {
@@ -1392,7 +1379,12 @@ where
                     viewport_info.native_pixels_per_point = Some(self.native_scale);
                 }
                 event @ (baseview::WindowEvent::Focused | baseview::WindowEvent::Unfocused) => {
-                    update_focus_input(&mut self.egui_input, self.viewport_id, event);
+                    update_focus_input(
+                        &mut self.egui_input,
+                        &mut self.modifiers,
+                        self.viewport_id,
+                        event,
+                    );
                 }
                 baseview::WindowEvent::Occluded(occluded) => {
                     // The renderer's half of it: what the window shows for the
@@ -1526,15 +1518,15 @@ fn press_sends(event: &keyboard_types::KeyboardEvent, modifiers: egui::Modifiers
 
 /// Send egui a key event as `owns_key` decided it. A press the host gets never
 /// reaches egui, so one keystroke acts in one place; an owned press brings its
-/// key and what it sends ([`press_sends`]). A release always reaches egui, so
-/// a key cannot stay held there when focus or modifiers changed after its
-/// press.
+/// key and what it sends ([`press_sends`]), a paste the clipboard's text that
+/// `paste` reads. A release always reaches egui, so a key cannot stay held
+/// there when focus or modifiers changed after its press.
 fn queue_key(
     events: &mut Vec<egui::Event>,
     event: &keyboard_types::KeyboardEvent,
     modifiers: egui::Modifiers,
     owned: bool,
-    clipboard: Option<&mut Clipboard>,
+    paste: impl FnOnce() -> Option<String>,
 ) {
     let pressed = event.state == keyboard_types::KeyState::Down;
     if pressed && !owned {
@@ -1557,26 +1549,19 @@ fn queue_key(
     match press_sends(event, modifiers) {
         PressSends::Cut => events.push(egui::Event::Cut),
         PressSends::Copy => events.push(egui::Event::Copy),
-        PressSends::Paste => {
-            if let Some(clipboard) = clipboard {
-                match clipboard.get_contents() {
-                    Ok(contents) => events.push(egui::Event::Text(contents)),
-                    Err(err) => {
-                        error!("Paste error: {}", err);
-                    }
-                }
-            }
-        }
+        PressSends::Paste => events.extend(paste().map(egui::Event::Text)),
         PressSends::Text(written) => events.push(egui::Event::Text(written.to_owned())),
         PressSends::Nothing => {}
     }
 }
 
 /// The keys a focused text field uses: whatever `queue_key` sends it as typing
-/// or a clipboard event, and the editing commands egui 0.35's TextEdit reads:
+/// or a clipboard event, and the editing commands egui 0.37's TextEdit reads:
 /// `events` and `check_for_mutating_key_press` in `widgets/text_edit/builder.rs`,
 /// and `CCursorRange::on_key_press` in `text_selection/cursor_range.rs` for the
-/// cursor moves. An egui upgrade re-derives the table from those. Whether a
+/// cursor moves. A field's completion popup (`widgets/text_edit/completion.rs`)
+/// reads only keys the table already owns: the bare arrows, Enter, Tab and
+/// Escape. An egui upgrade re-derives the table from those. Whether a
 /// character is valid belongs to the field: a letter a number field rejects
 /// must never become a host command.
 fn text_edit_owns_key(event: &keyboard_types::KeyboardEvent, modifiers: egui::Modifiers) -> bool {
@@ -1609,9 +1594,27 @@ fn text_edit_owns_key(event: &keyboard_types::KeyboardEvent, modifiers: egui::Mo
     }
 }
 
+/// Queue a `ModifiersChanged` ahead of an event when the set it carries
+/// differs from the one egui holds (`held`), and return that set. egui keeps
+/// its modifiers between passes and changes them only by that event, so the
+/// event's own set is what corrects a modifier released over another window.
+fn queue_modifiers(
+    held: &mut egui::Modifiers,
+    events: &mut Vec<egui::Event>,
+    modifiers: keyboard_types::Modifiers,
+) -> egui::Modifiers {
+    let modifiers = crate::translate::translate_modifiers(modifiers);
+    if modifiers != *held {
+        *held = modifiers;
+        events.push(egui::Event::ModifiersChanged(modifiers));
+    }
+    modifiers
+}
+
 /// RawInput.focused drives egui's InputState; the event also clears held keys.
 fn update_focus_input(
     input: &mut egui::RawInput,
+    held: &mut egui::Modifiers,
     viewport_id: egui::ViewportId,
     event: &baseview::WindowEvent,
 ) {
@@ -1624,6 +1627,13 @@ fn update_focus_input(
     // gesture on the focus-lost event, and egui reads the flag.
     input.focused = focused;
     input.events.push(egui::Event::WindowFocused(focused));
+    if !focused {
+        // egui clears its modifiers on the focus-lost event, so they are
+        // none until the next event carrying them, which `queue_modifiers`
+        // then sends even when it is the set held before: a Cmd still down
+        // when the window comes back.
+        *held = egui::Modifiers::NONE;
+    }
     if let Some(viewport) = input.viewports.get_mut(&viewport_id) {
         viewport.focused = Some(focused);
     }
@@ -1753,6 +1763,13 @@ fn set_screen_rect(
     }
 }
 
+/// One egui pass, its output dropped as `on_frame` leaves it: with its
+/// texture delta applied, which egui asserts of a dropped delta.
+#[cfg(test)]
+fn run_pass(ctx: &egui::Context, input: egui::RawInput, ui: impl FnMut(&mut egui::Ui)) {
+    ctx.run_ui(input, ui).textures_delta.clear();
+}
+
 #[cfg(test)]
 mod key_capture_tests {
     use super::*;
@@ -1775,7 +1792,7 @@ mod key_capture_tests {
     fn queued(event: &keyboard_types::KeyboardEvent, owned: bool) -> Vec<egui::Event> {
         let mut events = Vec::new();
         let modifiers = crate::translate::translate_modifiers(event.modifiers);
-        queue_key(&mut events, event, modifiers, owned, None);
+        queue_key(&mut events, event, modifiers, owned, || None);
         events
     }
 
@@ -1783,7 +1800,7 @@ mod key_capture_tests {
     fn typing() -> egui::Context {
         let ctx = egui::Context::default();
         let mut text = String::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        run_pass(&ctx, egui::RawInput::default(), |ui| {
             ui.text_edit_singleline(&mut text).request_focus()
         });
         assert!(ctx.text_edit_focused());
@@ -1806,9 +1823,9 @@ mod key_capture_tests {
                     .id,
             );
         };
-        let _ = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        run_pass(&ctx, egui::RawInput::default(), &mut draw);
         egui::Popup::open_id(&ctx, combo.get().with("popup"));
-        let _ = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        run_pass(&ctx, egui::RawInput::default(), &mut draw);
         assert!(egui::ComboBox::is_open(&ctx, combo.get()));
         assert!(!ctx.egui_wants_keyboard_input());
         let event = KeyboardEvent { key: Key::Escape, state: KeyState::Down, ..Default::default() };
@@ -1825,7 +1842,7 @@ mod key_capture_tests {
             }],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, &mut draw);
+        run_pass(&ctx, input, &mut draw);
         assert!(!egui::ComboBox::is_open(&ctx, combo.get()));
         assert!(!owns(&ctx, &[], &event));
     }
@@ -1843,7 +1860,7 @@ mod key_capture_tests {
                 ..Default::default()
             };
             let mut rect = Rect::NOTHING;
-            let _ = ctx.run_ui(raw, |ui| {
+            run_pass(&ctx, raw, |ui| {
                 rect = ui.allocate_response(vec2(100.0, 100.0), egui::Sense::drag()).rect
             });
             rect
@@ -1892,7 +1909,7 @@ mod key_capture_tests {
         ];
         // A focused button changes nothing: only a text field takes keys.
         let button = egui::Context::default();
-        let _ = button.run_ui(egui::RawInput::default(), |ui| ui.button("button").request_focus());
+        run_pass(&button, egui::RawInput::default(), |ui| ui.button("button").request_focus());
         for (key, modifiers, expected) in [
             (Key::Character("z".into()), command(), true),
             (Key::Character("Z".into()), command() | M::SHIFT, true),
@@ -2011,7 +2028,7 @@ mod key_capture_tests {
     fn a_focused_button_leaves_space_to_the_host() {
         use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| ui.button("button").request_focus());
+        run_pass(&ctx, egui::RawInput::default(), |ui| ui.button("button").request_focus());
         assert!(ctx.egui_wants_keyboard_input() && !ctx.text_edit_focused());
         let space = KeyboardEvent {
             key: Key::Character(" ".into()),
@@ -2040,7 +2057,7 @@ mod key_capture_tests {
                 ..Default::default()
             };
             let mut rect = Rect::NOTHING;
-            let _ = ctx.run_ui(raw, |ui| rect = ui.add(egui::DragValue::new(&mut value)).rect);
+            run_pass(&ctx, raw, |ui| rect = ui.add(egui::DragValue::new(&mut value)).rect);
             rect
         };
         let at = frame(vec![]).center();
@@ -2084,7 +2101,7 @@ mod key_capture_tests {
                 ..Default::default()
             };
             let mut label = Rect::NOTHING;
-            let _ = ctx.run_ui(raw, |ui| label = ui.label("frame stall 41 ms").rect);
+            run_pass(&ctx, raw, |ui| label = ui.label("frame stall 41 ms").rect);
             label
         };
         let label = frame(vec![]);
@@ -2133,7 +2150,7 @@ mod key_capture_tests {
                 ..Default::default()
             };
             let mut label = Rect::NOTHING;
-            let _ = ctx.run_ui(raw, |ui| label = ui.label("frame stall 41 ms").rect);
+            run_pass(&ctx, raw, |ui| label = ui.label("frame stall 41 ms").rect);
             label
         };
         let label = frame(vec![]);
@@ -2199,6 +2216,7 @@ mod key_capture_tests {
         use keyboard_types::{Key, KeyState, KeyboardEvent};
         let option_a = [egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::A)];
         let ctx = egui::Context::default();
+        let mut held = egui::Modifiers::NONE;
         for (state, modifiers) in [
             (KeyState::Down, M::ALT),
             // Option is released before A; its release no longer matches the shortcut.
@@ -2207,10 +2225,11 @@ mod key_capture_tests {
         ] {
             let event =
                 KeyboardEvent { key: Key::Character("a".into()), state, modifiers, ..Default::default() };
-            let events = queued(&event, owns(&ctx, &option_a, &event));
-            let modifiers = crate::translate::translate_modifiers(modifiers);
-            let raw = egui::RawInput { events, modifiers, focused: true, ..Default::default() };
-            let _ = ctx.run_ui(raw, |ui| {
+            let mut events = Vec::new();
+            queue_modifiers(&mut held, &mut events, modifiers);
+            events.extend(queued(&event, owns(&ctx, &option_a, &event)));
+            let raw = egui::RawInput { events, focused: true, ..Default::default() };
+            run_pass(&ctx, raw, |ui| {
                 assert_eq!(ui.input(|input| input.key_down(egui::Key::A)), state == KeyState::Down);
             });
         }
@@ -2238,7 +2257,7 @@ mod resize_tests {
             let mut input = egui::RawInput::default();
             set_screen_rect(&mut input, egui::ViewportId::ROOT, size, points_per_pixel(scale, 1.0));
             let context = egui::Context::default();
-            let _ = context.run_ui(input, |ui| {
+            run_pass(&context, input, |ui| {
                 assert_eq!(
                     ui.ctx().input(|i| i.viewport().inner_rect.unwrap().size()),
                     vec2(1300.0, 750.0)
@@ -2271,7 +2290,7 @@ mod resize_tests {
             assert_eq!(input.screen_rect.unwrap().size(), vec2(1120.0, 640.0));
             let context = egui::Context::default();
             context.options_mut(|options| options.zoom_factor = 1.25);
-            let _ = context.run_ui(input, |ui| {
+            run_pass(&context, input, |ui| {
                 assert_eq!(ui.ctx().pixels_per_point(), scale * 1.25);
                 assert_eq!(ui.ctx().content_rect().size(), vec2(1120.0, 640.0));
             });
@@ -2323,7 +2342,7 @@ mod resize_tests {
             let context = egui::Context::default();
             let raw = egui::RawInput { events, ..Default::default() };
             let mut clicked = false;
-            let _ = context.run_ui(raw, |ui| clicked = ui.ctx().input(|i| i.pointer.any_click()));
+            run_pass(&context, raw, |ui| clicked = ui.ctx().input(|i| i.pointer.any_click()));
             clicked
         };
         assert!(clicked(baseview::Point::new(401.0, 200.0)), "a click in place");
@@ -2334,6 +2353,7 @@ mod resize_tests {
     fn native_resize_focus_events_reach_egui_and_persist_between_frames() {
         let context = egui::Context::default();
         let mut input = egui::RawInput::default();
+        let mut held = egui::Modifiers::NONE;
         for (event, expected) in [
             (Some(baseview::WindowEvent::Focused), true),
             (Some(baseview::WindowEvent::Unfocused), false),
@@ -2341,14 +2361,40 @@ mod resize_tests {
             (Some(baseview::WindowEvent::Focused), true),
         ] {
             if let Some(event) = event {
-                update_focus_input(&mut input, egui::ViewportId::ROOT, &event);
+                update_focus_input(&mut input, &mut held, egui::ViewportId::ROOT, &event);
                 assert!(input.events.iter().any(
                     |event| matches!(event, egui::Event::WindowFocused(focused) if *focused == expected)
                 ));
             }
-            let _ = context.run_ui(input.take(), |ui| {
+            run_pass(&context, input.take(), |ui| {
                 assert_eq!(ui.ctx().input(|i| i.focused), expected);
                 assert_eq!(ui.ctx().input(|i| i.viewport().focused), Some(expected));
+            });
+        }
+    }
+
+    /// egui drops its modifiers when the window loses focus, so a Cmd still
+    /// held when it comes back is sent again by the first event carrying it.
+    #[test]
+    fn a_modifier_held_across_a_refocus_reaches_egui() {
+        use baseview::WindowEvent::{Focused, Unfocused};
+        use keyboard_types::Modifiers as M;
+        let context = egui::Context::default();
+        let mut held = egui::Modifiers::NONE;
+        let mut input = egui::RawInput::default();
+        for (focus, carried, command) in [
+            (None, Some(M::META), true),
+            (Some(Unfocused), None, false),
+            (Some(Focused), Some(M::META), true),
+        ] {
+            if let Some(event) = focus {
+                update_focus_input(&mut input, &mut held, egui::ViewportId::ROOT, &event);
+            }
+            if let Some(modifiers) = carried {
+                queue_modifiers(&mut held, &mut input.events, modifiers);
+            }
+            run_pass(&context, input.take(), |ui| {
+                assert_eq!(ui.input(|i| i.modifiers.command), command);
             });
         }
     }
