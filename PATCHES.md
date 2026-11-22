@@ -383,6 +383,8 @@ The host does receive the release of a key it never saw go down, as it already d
 The egui-internal claims take the bare chord only, so a host command on the same key with another modifier (Cmd-Shift-C) stays the host's.
 A drag in progress owns bare Escape, which egui cancels it on (`interaction::interact`), since its widget's focus no longer keeps the key.
 An open memory-tracked popup owns bare Escape, even without widget focus, so closing a combo box does not also send Escape to the DAW (#1659).
+It also owns the bare arrows, which egui 0.37 moves through a menu with (egui#8548, `MenuState::handle_keyboard`; a combo box is a menu), and bare Space and Enter while the focus is in a popup's foreground layer, which click the focused entry (`popup_owns_key`).
+A menu opened with the mouse focuses nothing until an arrow does, so Space there still plays the DAW, as it does over a button focused beneath the popup; with a modifier, or no popup open, the keys are the host's as before.
 A label holding a selection owns bare Cmd-C, which egui turns into its own copy, so the DAW does not copy too (#1608),
 and bare Escape, which clears that selection (#1674);
 the arrows and Cmd-A, which move it, stay the host's, since a stray click on a label would otherwise take the arrows from the DAW.

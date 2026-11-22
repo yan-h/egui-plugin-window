@@ -1440,6 +1440,9 @@ where
 ///
 /// Bare Escape is owned while a drag is in progress, which egui cancels on it;
 /// and while a popup is open, which it closes, even without widget focus.
+/// An open popup also owns the bare arrows, and Space and Enter once the
+/// focus is in it ([`popup_owns_key`]), which move through a menu and click
+/// its entries.
 /// A selection in a label owns bare Cmd-C and bare Escape: unowned, the same
 /// Cmd-C also goes up to the host, and its own copy competes with the label's
 /// for the pasteboard; Escape clears the selection, and would clear the
@@ -1475,18 +1478,42 @@ fn owns_key(
     let label_selected = || {
         ctx.with_plugin(|labels: &mut LabelSelectionState| labels.has_selection()) == Some(true)
     };
-    if escape && (ctx.dragged_id().is_some() || egui::Popup::is_any_open(ctx))
+    let popup_open = egui::Popup::is_any_open(ctx);
+    if escape && (ctx.dragged_id().is_some() || popup_open)
         || (escape || copy) && label_selected()
     {
+        return true;
+    }
+    let key = crate::translate::translate_key(event);
+    if popup_open && modifiers.is_none() && popup_owns_key(ctx, key) {
         return true;
     }
     if ctx.text_edit_focused() {
         return text_edit_owns_key(event, modifiers);
     }
-    let key = crate::translate::translate_key(event);
     shortcuts.iter().any(|shortcut| {
         key == Some(shortcut.logical_key) && modifiers.matches_exact(shortcut.modifiers)
     })
+}
+
+/// The bare keys an open popup uses, as egui 0.37 moves through a menu
+/// (`MenuState::handle_keyboard` in `containers/menu.rs`, on the focus
+/// directions `memory/mod.rs` reads): the arrows, which with nothing focused
+/// yet focus the menu's first entry, and Space and Enter, which click the
+/// focused widget (`Context::create_widget`). Those two only while the focus
+/// is in a popup, which egui lays out in the foreground: a menu opened with
+/// the mouse focuses nothing, and Space then plays the host, nor does a
+/// button focused under the popup take it.
+fn popup_owns_key(ctx: &egui::Context, key: Option<egui::Key>) -> bool {
+    use egui::Key;
+    match key {
+        Some(Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight) => true,
+        Some(Key::Space | Key::Enter) => ctx
+            .memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .is_some_and(|focused| focused.layer_id.order == egui::Order::Foreground),
+        _ => false,
+    }
 }
 
 /// What a press sends egui beside its key event. Read by both `queue_key`,
@@ -1845,6 +1872,62 @@ mod key_capture_tests {
         run_pass(&ctx, input, &mut draw);
         assert!(!egui::ComboBox::is_open(&ctx, combo.get()));
         assert!(!owns(&ctx, &[], &event));
+    }
+
+    /// An open menu owns the bare arrows, which move through it, and Space and
+    /// Enter once an arrow has put the focus in it; closed, or with a modifier,
+    /// they are the host's.
+    #[test]
+    fn an_open_menu_owns_its_arrows_and_then_its_activation_keys() {
+        use keyboard_types::{Code, Key, KeyState, KeyboardEvent};
+        let ctx = egui::Context::default();
+        let combo = std::cell::Cell::new(egui::Id::NULL);
+        let picked = std::cell::Cell::new(false);
+        let mut draw = |ui: &mut egui::Ui| {
+            combo.set(
+                egui::ComboBox::from_id_salt("menu keys")
+                    .selected_text("choice")
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "choice").clicked() {
+                            picked.set(true);
+                        }
+                    })
+                    .response
+                    .id,
+            );
+        };
+        let press = |key| KeyboardEvent { key, state: KeyState::Down, ..Default::default() };
+        let down = press(Key::ArrowDown);
+        let enter = press(Key::Enter);
+        let space = KeyboardEvent { code: Code::Space, ..press(Key::Character(" ".into())) };
+        let shift_down = KeyboardEvent { modifiers: M::SHIFT, ..down.clone() };
+        let pass = |ctx: &egui::Context, event: &KeyboardEvent, draw: &mut dyn FnMut(&mut egui::Ui)| {
+            let events = queued(event, owns(ctx, &[], event));
+            run_pass(ctx, egui::RawInput { events, ..Default::default() }, draw);
+        };
+
+        run_pass(&ctx, egui::RawInput::default(), &mut draw);
+        for key in [&down, &enter, &space] {
+            assert!(!owns(&ctx, &[], key), "a closed menu owns no key: {:?}", key.key);
+        }
+        egui::Popup::open_id(&ctx, combo.get().with("popup"));
+        run_pass(&ctx, egui::RawInput::default(), &mut draw);
+        assert!(egui::ComboBox::is_open(&ctx, combo.get()));
+        for arrow in [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight] {
+            assert!(owns(&ctx, &[], &press(arrow)), "an open menu's arrows");
+        }
+        assert!(!owns(&ctx, &[], &shift_down), "only the bare arrows");
+        assert!(!owns(&ctx, &[], &space), "nothing focused in the menu: Space plays the host");
+        assert!(!owns(&ctx, &[], &enter));
+
+        pass(&ctx, &down, &mut draw);
+        run_pass(&ctx, egui::RawInput::default(), &mut draw);
+        assert!(owns(&ctx, &[], &space), "the arrow focused an entry");
+        assert!(owns(&ctx, &[], &enter));
+        let shift_enter = KeyboardEvent { modifiers: M::SHIFT, ..enter.clone() };
+        assert!(!owns(&ctx, &[], &shift_enter), "only the bare chord");
+        pass(&ctx, &enter, &mut draw);
+        assert!(picked.get(), "Enter reached the focused entry");
     }
 
     /// egui cancels a drag on Escape (`interaction::interact`), so a drag in
