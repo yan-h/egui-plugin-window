@@ -49,6 +49,26 @@ impl std::fmt::Debug for SizeSource {
     }
 }
 
+/// Whom the window tells, once, that a panic has stopped it (see [`guarded`]),
+/// so the app ends what it holds open outside the window: a gesture with the
+/// host, a sound it is previewing. The app's update closure never runs again,
+/// so this is the app's last word. Called on the window's thread, after the
+/// call that panicked, under a catch of its own.
+#[derive(Clone)]
+pub struct StopNotice(Arc<dyn Fn() + Send + Sync>);
+
+impl StopNotice {
+    pub fn new(notice: impl Fn() + Send + Sync + 'static) -> Self {
+        StopNotice(Arc::new(notice))
+    }
+}
+
+impl std::fmt::Debug for StopNotice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StopNotice")
+    }
+}
+
 /// How anything outside the window asks it for a UI pass on its next frame:
 /// a thread that has changed what the UI shows, with nothing the window would
 /// otherwise notice.
@@ -110,6 +130,10 @@ pub struct EguiWindowSettings {
     /// Whom the view tells that it stopped being seen, if anyone: handed to
     /// baseview, which owns the test. See [`baseview::UnseenNotice`].
     pub unseen_notice: Option<baseview::UnseenNotice>,
+
+    /// Whom a panic that stops the window tells, if anyone. See
+    /// [`StopNotice`].
+    pub stop_notice: Option<StopNotice>,
 }
 
 impl EguiWindowSettings {
@@ -151,6 +175,11 @@ impl EguiWindowSettings {
         self.unseen_notice = Some(notice);
         self
     }
+
+    pub fn with_stop_notice(mut self, notice: StopNotice) -> Self {
+        self.stop_notice = Some(notice);
+        self
+    }
 }
 
 impl Default for EguiWindowSettings {
@@ -166,6 +195,7 @@ impl Default for EguiWindowSettings {
             size_source: None,
             pass_request: PassRequest::default(),
             unseen_notice: None,
+            stop_notice: None,
         }
     }
 }
@@ -403,6 +433,8 @@ where
     /// Set by a panic in a frame or an event ([`guarded`]): from then on the
     /// window draws nothing and answers nothing until it closes.
     stopped: bool,
+    /// See [`StopNotice`]; taken at the stop.
+    stop_notice: Option<StopNotice>,
     /// When the UI next wants a pass, on the frame clock (see [`frame_at`]):
     /// the frame time of the last pass plus the repaint delay it asked for.
     /// `None` while it asks for none.
@@ -565,6 +597,7 @@ where
             bg_color,
             close_requested,
             stopped: false,
+            stop_notice: settings.stop_notice.clone(),
             repaint_after: Some(start_time),
             pass_request: settings.pass_request.clone(),
             tick_gaps: TickGaps::default(),
@@ -1050,7 +1083,7 @@ mod pass_due_tests {
 /// window catches both, around everything it runs, whatever the app's own
 /// update closure catches inside. After a panic its state is half updated,
 /// and a bug in it would panic again every frame, so it stops rather than
-/// drawing on: the view stays, showing nothing new, until the host closes it.
+/// drawing on (`EguiWindow::stop`).
 fn guarded<T>(stopped: &mut bool, what: &str, failure: T, body: impl FnOnce() -> T) -> T {
     if *stopped {
         return failure;
@@ -1098,7 +1131,7 @@ where
     fn on_frame(&mut self, window: &mut Window) {
         let mut stopped = self.stopped;
         guarded(&mut stopped, "a frame", (), || self.frame(window));
-        self.stopped = stopped;
+        self.stop(stopped);
     }
 
     /// Ignored once stopped, so the host gets every event back.
@@ -1106,8 +1139,33 @@ where
         let mut stopped = self.stopped;
         let status =
             guarded(&mut stopped, "an event", EventStatus::Ignored, || self.event(window, event));
-        self.stopped = stopped;
+        self.stop(stopped);
         status
+    }
+}
+
+impl<State, U> EguiWindow<State, U>
+where
+    State: 'static + Send,
+    U: FnMut(&mut egui::Ui, &mut Queue, &mut State),
+    U: 'static + Send,
+{
+    /// The stop, once, as [`guarded`] first reports it: the layer hidden as an
+    /// occluded window's is, which only a presenting frame brings back, so
+    /// the view goes blank rather than showing a last frame that looks
+    /// usable; then the app told ([`StopNotice`]). Each under a catch, since
+    /// either may meet what the panic left half updated.
+    fn stop(&mut self, stopped: bool) {
+        if !stopped || self.stopped {
+            return;
+        }
+        self.stopped = true;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.renderer.window_occluded(true)
+        }));
+        if let Some(StopNotice(notice)) = self.stop_notice.take() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notice()));
+        }
     }
 }
 

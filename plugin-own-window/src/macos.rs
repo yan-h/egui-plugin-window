@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
 use std::mem::ManuallyDrop;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock, Weak};
@@ -682,13 +683,29 @@ impl OwnWindow {
             state.closing = true;
             (closed, window)
         };
-        if closed() {
-            return;
+        match std::panic::catch_unwind(AssertUnwindSafe(|| closed())) {
+            Ok(true) => {}
+            // The host could not be told: minimizing is reversible, so a later
+            // click may try again. A delivered close stays latched.
+            Ok(false) => {
+                self.state().borrow_mut().closing = false;
+                window.miniaturize(None);
+            }
+            // The telling panicked: while the window is still the editor's,
+            // its button works again, and the panic goes on to `answer`.
+            Err(panic) => {
+                let mut state = self.state().borrow_mut();
+                if state
+                    .window
+                    .as_ref()
+                    .is_some_and(|open| Retained::as_ptr(open) == Retained::as_ptr(&window))
+                {
+                    state.closing = false;
+                }
+                drop(state);
+                std::panic::resume_unwind(panic);
+            }
         }
-        // The host could not be told: minimizing is reversible, so a later
-        // click may try again. A delivered close stays latched.
-        self.state().borrow_mut().closing = false;
-        window.miniaturize(None);
     }
 
     /// Another app came to the front, or the host did: float above the
@@ -925,7 +942,7 @@ impl Agent {
 /// process's panic hook has logged it. Unlatched, unlike a frame's catch,
 /// since each call answers one act of the player's rather than every frame.
 fn answer(agent: &AnyObject, call: impl FnOnce(&OwnWindow)) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
         if let Some(own) = Agent::own(agent) {
             call(&own);
         }
