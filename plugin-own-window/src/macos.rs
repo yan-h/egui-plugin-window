@@ -917,31 +917,38 @@ impl Agent {
     }
 }
 
+/// `call` on the agent's window, if it is still there, under a catch. The
+/// agent's calls come from the run loop, outside any frame or call of the
+/// plug-in's, and reach the plug-in's `closed` and `moving`: a panic
+/// unwinding into AppKit from them would take the host process down, where
+/// caught it costs the one act, the window left as the panic left it. The
+/// process's panic hook has logged it. Unlatched, unlike a frame's catch,
+/// since each call answers one act of the player's rather than every frame.
+fn answer(agent: &AnyObject, call: impl FnOnce(&OwnWindow)) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(own) = Agent::own(agent) {
+            call(&own);
+        }
+    }));
+}
+
 /// Another app came to the front, or the host did.
 extern "C-unwind" fn activated(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
-    if let Some(own) = Agent::own(this) {
-        own.front_changed();
-    }
+    answer(this, OwnWindow::front_changed);
 }
 
 /// A move [`OwnWindow::want`] deferred to here.
 extern "C-unwind" fn apply(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
-    if let Some(own) = Agent::own(this) {
-        own.apply();
-    }
+    answer(this, OwnWindow::apply);
 }
 
 /// A click [`window_should_close`] deferred to here, with the window clicked.
 extern "C-unwind" fn host_close(this: &AnyObject, _: Sel, clicked: Option<&AnyObject>) {
-    if let Some(own) = Agent::own(this) {
-        own.ask_host_close(clicked);
-    }
+    answer(this, |own| own.ask_host_close(clicked));
 }
 
 extern "C-unwind" fn settle(this: &AnyObject, _: Sel, _: Option<&AnyObject>) {
-    if let Some(own) = Agent::own(this) {
-        own.settle();
-    }
+    answer(this, OwnWindow::settle);
 }
 
 /// The close button: refused, and the host told instead on the run loop's
