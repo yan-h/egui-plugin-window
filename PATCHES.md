@@ -481,6 +481,13 @@ copypasta pulled a second objc2 generation (objc2 0.5, objc2-app-kit and objc2-f
 Plain text is all egui copies or pastes. A copy the pasteboard refuses is logged, as copypasta's error was; the paste error log and the clipboard's failed-open path are gone,
 and an empty pasteboard pastes nothing, as before, and a copied file no longer pastes as its path (baseview's Patch 14). Off macOS baseview's stub reads none, as copypasta's no-op context did.
 `queue_key` takes the paste as a function, so its tests never read the real pasteboard.
+- **Patch 32** (`src/window.rs` `on_frame`, `on_event`; for otonal, its #1827): no unwind leaves a frame or an event.
+Each body runs under a catch (`guarded`), the frame's around the size source, egui's end of pass and the renderer as well as the app's update closure.
+A panic unwinding into baseview's run loop aborts the process, in the display link's frames before any handler further out is found (otonal's premises audit, its #1783), and so takes a plug-in's host down.
+On a panic the window logs once and stops: every later frame and event returns at once, an event as ignored.
+At the stop it hides the layer, through the occlusion path, which only a presenting frame undoes, so the view goes blank rather than keeping a last frame that looks usable;
+then it tells the app through `EguiWindowSettings::with_stop_notice` (`StopNotice`), whose update closure never runs again, to end what it holds open outside the window, such as a gesture with the host.
+An app's own catch inside its update closure, which otonal's shell has, still gives it the better answer.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1.0, toolchain 1.99.1) kept both bases and needed no baseview change;
@@ -542,6 +549,8 @@ so for harmonigraph, whose copy left it to AppKit, this is very likely no visibl
   Both copies meant to, but set the size between `setFrameUsingName:` and `setFrameAutosaveName:`, and naming the frame restores the remembered one again (measured),
   so their window reopened as large as the last own window was, and the editor took that size. The size is now set after the naming.
   - It takes the two views as raw `NSView` pointers rather than either shell's window-handle types, so it depends on neither shell nor on `raw-window-handle`.
+  - The agent's run-loop calls (`activated:`, `apply:`, `hostClose:`, `settle:`) run under a catch (`answer`), since they reach the shell's `moving` and `closed` outside any frame or plug-in call, and a panic unwinding into AppKit would take the host down (otonal#1827). Unlatched: each answers one act of the player's, not every frame. The process's panic hook logs it; this crate has no logger.
+A panic in the `closed` callback clears the close latch while the window is still the editor's, so the button works again.
 - **The editor's size** (`src/size.rs`, `EditorSize`; issue #13): otonal's size negotiation (`crates/otonal-clap/src/editor/resize.rs` and its `next_size`), moved here whole, with the own window folded in, so a shell runs one sequence rather than each writing it.
   The sequence and its lock-free word are otonal's, with its negotiation tests; its test of the sequence against a fake own window became a native one against a real window (`editor_size`), which cannot make AppKit apply another size than asked, so that case is untested.
   What changed in the move:
