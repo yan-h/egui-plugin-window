@@ -5,10 +5,9 @@ use objc2::rc::{autoreleasepool, Retained, Weak};
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{msg_send, ClassType, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardTypeFileURL,
-    NSPasteboardTypeString,
+    NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardTypeString,
 };
-use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2_foundation::{NSArray, NSString};
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, HasRawDisplayHandle, HasRawWindowHandle,
     RawDisplayHandle, RawWindowHandle,
@@ -237,12 +236,7 @@ pub fn copy_to_clipboard(string: &str) -> bool {
 
 pub fn clipboard_text() -> Option<String> {
     autoreleasepool(|_| {
-        let pb = general_pasteboard()?;
-        let path = pb
-            .stringForType(unsafe { NSPasteboardTypeFileURL })
-            .and_then(|url| NSURL::URLWithString(&url))
-            .and_then(|url| url.path());
-        let text = path.or_else(|| pb.stringForType(unsafe { NSPasteboardTypeString }))?;
+        let text = general_pasteboard()?.stringForType(unsafe { NSPasteboardTypeString })?;
         Some(text.to_string())
     })
 }

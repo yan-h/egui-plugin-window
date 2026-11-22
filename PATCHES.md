@@ -180,7 +180,7 @@ Unprotected: a queued key press the editor would have owned acts in both the edi
 `tests/reentrant_events.rs` (no harness) sends keys to the view from inside the handler's own key event and checks their order and that they reached the host;
 `tests/unseen_notice.rs`, whose notice used to detect a call inside the borrow by that panic, now has the handler record one instead.
 - **Patch 14** (`src/clipboard.rs`, `src/platform/macos/window.rs`, `src/platform/none.rs`, `Cargo.toml`): `clipboard_text` reads the general pasteboard, beside upstream's `copy_to_clipboard`, for egui-baseview's paste and copy (its Patch 31).
-A copied file reads as its path, as copypasta's did, else the plain text; off macOS it reads none.
+It reads plain text only, Yan's choice (2026-11-21): a file copied in Finder pastes whatever plain text Finder put beside it, if any, where copypasta pasted the file's path; off macOS it reads none.
 Both look the pasteboard up as an optional (`general_pasteboard`), since objc2's `generalPasteboard` is declared non-null and a restricted process can be refused one: with none, a paste reads nothing and a copy writes nothing.
 `copy_to_clipboard` clears and then writes the text with `writeObjects:`, which declares its own type, where upstream called `setString:forType:`, documented only against a declared type;
 it returns whether the write landed.
@@ -479,7 +479,7 @@ and a project that names `baseview` at another commit builds two, whose types do
 egui's copy goes to `baseview::copy_to_clipboard` and a paste reads `baseview::clipboard_text` (baseview's Patch 14), both on objc2-app-kit 0.3, which baseview already builds;
 copypasta pulled a second objc2 generation (objc2 0.5, objc2-app-kit and objc2-foundation 0.2) into both plug-ins.
 Plain text is all egui copies or pastes. A copy the pasteboard refuses is logged, as copypasta's error was; the paste error log and the clipboard's failed-open path are gone,
-and an empty pasteboard pastes nothing, as before. Off macOS baseview's stub reads none, as copypasta's no-op context did.
+and an empty pasteboard pastes nothing, as before, and a copied file no longer pastes as its path (baseview's Patch 14). Off macOS baseview's stub reads none, as copypasta's no-op context did.
 `queue_key` takes the paste as a function, so its tests never read the real pasteboard.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
@@ -487,6 +487,7 @@ The last port (egui and egui-wgpu 0.35 to 0.37, wgpu 29 to 30, pollster 0.4 to 1
 besides the patches noted above it gives a wheel event `MouseWheelSource::Unknown`, since baseview reports neither what scrolled nor the phase,
 ignores `OutputCommand::TextSelectionSettled`, since macOS has no primary selection,
 and presents through `Queue::present`.
+wgpu-hal 30 tags the Metal layer's colour space as sRGB, so both editors are now colour-managed sRGB: a visible change Yan accepted on 2026-11-21.
 egui-wgpu 0.35 and 0.37 both free textures after the submit; this fork freed before it until #30 (Patch 17).
 wgpu-hal 30's Metal present path is unchanged from 29's, and its acquire refuses an occluded window as before, so Patches 10, 12 and 17 carry over as they were.
 The `frame-log` feature needs harmonigraph's present observer ported to its wgpu-hal 30 and is unbuilt here.

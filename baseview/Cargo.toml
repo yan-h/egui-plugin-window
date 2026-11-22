@@ -126,7 +126,6 @@ features = [
     "NSOperation",
     "NSObjCRuntime",
     "NSRunLoop",
-    "NSURL",
 ]
 default-features = false
 
