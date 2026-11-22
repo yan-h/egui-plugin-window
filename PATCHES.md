@@ -179,8 +179,11 @@ so a queued event reaches the handler in the order it arrived, ahead of any even
 Unprotected: a queued key press the editor would have owned acts in both the editor and the host (egui-baseview's Patch 18 keeps one keystroke in one place only for keys answered in time).
 `tests/reentrant_events.rs` (no harness) sends keys to the view from inside the handler's own key event and checks their order and that they reached the host;
 `tests/unseen_notice.rs`, whose notice used to detect a call inside the borrow by that panic, now has the handler record one instead.
-- **Patch 14** (`src/clipboard.rs`, `src/platform/macos/window.rs`, `src/platform/none.rs`, `Cargo.toml`): `clipboard_text` reads the general pasteboard, beside upstream's `copy_to_clipboard`, for egui-baseview's paste (its Patch 31).
+- **Patch 14** (`src/clipboard.rs`, `src/platform/macos/window.rs`, `src/platform/none.rs`, `Cargo.toml`): `clipboard_text` reads the general pasteboard, beside upstream's `copy_to_clipboard`, for egui-baseview's paste and copy (its Patch 31).
 A copied file reads as its path, as copypasta's did, else the plain text; off macOS it reads none.
+Both look the pasteboard up as an optional (`general_pasteboard`), since objc2's `generalPasteboard` is declared non-null and a restricted process can be refused one: with none, a paste reads nothing and a copy writes nothing.
+`copy_to_clipboard` clears and then writes the text with `writeObjects:`, which declares its own type, where upstream called `setString:forType:`, documented only against a declared type;
+it returns whether the write landed.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.
 The [last one](docs/archive/gui-cohort-feasibility.md) is archived as a dated result (2026-09-19, re-evaluated 2026-10-21):
@@ -473,8 +476,8 @@ and a project that names `baseview` at another commit builds two, whose types do
 - **Patch 31** (`src/window.rs`, `Cargo.toml`): the clipboard through baseview, not copypasta.
 egui's copy goes to `baseview::copy_to_clipboard` and a paste reads `baseview::clipboard_text` (baseview's Patch 14), both on objc2-app-kit 0.3, which baseview already builds;
 copypasta pulled a second objc2 generation (objc2 0.5, objc2-app-kit and objc2-foundation 0.2) into both plug-ins.
-Plain text is all egui copies or pastes. Neither call can fail in a way worth reporting, so the copy and paste error logs and the clipboard's failed-open path are gone;
-an empty pasteboard pastes nothing, as before. Off macOS baseview's stub reads none, as copypasta's no-op context did.
+Plain text is all egui copies or pastes. A copy the pasteboard refuses is logged, as copypasta's error was; the paste error log and the clipboard's failed-open path are gone,
+and an empty pasteboard pastes nothing, as before. Off macOS baseview's stub reads none, as copypasta's no-op context did.
 `queue_key` takes the paste as a function, so its tests never read the real pasteboard.
 - **Upgrade**: a port onto this tree, not a re-vendor.
 Start from a fresh comparison with the versions then published.

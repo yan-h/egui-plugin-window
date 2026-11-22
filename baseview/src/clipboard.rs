@@ -1,4 +1,6 @@
-pub fn copy_to_clipboard(data: &str) {
+/// Put text on the clipboard, and say whether it was written. Off macOS,
+/// nothing is.
+pub fn copy_to_clipboard(data: &str) -> bool {
     crate::platform::copy_to_clipboard(data)
 }
 

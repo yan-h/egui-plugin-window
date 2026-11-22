@@ -89,7 +89,9 @@ unsafe impl<'a> HasRawDisplayHandle for Window<'a> {
     }
 }
 
-pub fn copy_to_clipboard(_data: &str) {}
+pub fn copy_to_clipboard(_data: &str) -> bool {
+    false
+}
 
 pub fn clipboard_text() -> Option<String> {
     None

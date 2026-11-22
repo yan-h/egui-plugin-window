@@ -1217,7 +1217,11 @@ where
 
         for command in full_output.platform_output.commands {
             match command {
-                egui::OutputCommand::CopyText(text) => baseview::copy_to_clipboard(&text),
+                egui::OutputCommand::CopyText(text) => {
+                    if !baseview::copy_to_clipboard(&text) {
+                        error!("Copy/Cut error: the pasteboard refused the text");
+                    }
+                }
                 // macOS has no primary selection to put it in.
                 egui::OutputCommand::TextSelectionSettled(_) => {}
                 egui::OutputCommand::CopyImage(_) => {
