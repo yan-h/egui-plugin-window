@@ -19,7 +19,7 @@ use objc2_foundation::{
     NSArray, NSDictionary, NSNumber, NSObject, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
 };
 
-use crate::{Limits, Move, OwnSize};
+use crate::{EditorSize, Limits};
 
 /// The level Bitwig gives its plug-in windows, measured (CG layer 3), and
 /// `kCGFloatingWindowLevel`: above the host's own windows.
@@ -30,18 +30,23 @@ const NORMAL: NSWindowLevel = 0;
 /// The editor's own window, one per open editor: see the crate
 /// documentation.
 ///
-/// The plug-in's editor handle owns it, and drops or [closes](Self::close) it
-/// as the host destroys the editor; everything else, the size source and the
-/// frame among them, holds a [`Weak`], so a view that outlives its editor
-/// keeps nothing alive. The handle the shell requires is sendable, but every
-/// method reaches the AppKit state only on the main thread; a final drop off
-/// it waits for the main thread to run the cleanup.
-pub struct OwnWindow(MainThreadBound<Local>);
+/// Its [`EditorSize`] owns it from attach to close, and drops or
+/// [closes](Self::close) it as the host destroys the editor; the agent holds
+/// a [`Weak`], and it holds its editor by one, so a view that outlives its
+/// editor keeps nothing alive. The editor is sendable, but every method
+/// reaches the AppKit state only on the main thread; a final drop off it
+/// waits for the main thread to run the cleanup.
+pub(crate) struct OwnWindow(MainThreadBound<Local>);
 
 struct Local {
     /// The window's title, and the name AppKit keeps its frame under between
     /// opens, in the defaults of the process the plug-in runs in.
     name: Retained<NSString>,
+    /// Whose size the window's is while the view is in it: its limits bound
+    /// the window, and a move out or the player's resize sets its size. Only
+    /// its atomics are reached from here, since the moves that reach it run
+    /// inside the editor's own calls.
+    editor: Weak<EditorSize>,
     state: RefCell<State>,
 }
 
@@ -56,24 +61,11 @@ struct State {
     agent: Option<Retained<AnyObject>>,
     /// Whom the close button tells; without it the window has none.
     closed: Option<Rc<dyn Fn() -> bool>>,
-    /// Whom each move is told, before the view moves.
-    moving: Option<Rc<dyn Fn(Move)>>,
-    /// The sizes the shell allows, as last given: a window opened between
-    /// two frames takes them, and opens at the editor's size within them,
-    /// and the window does not exist when the size source gives them.
-    limits: Option<Limits>,
     /// The editor's own window, from just before the view moves into it to
     /// just before it moves out.
     window: Option<Retained<NSWindow>>,
-    /// The content size the editor last had from this window, in logical
-    /// points: the view's as it moved in, reported to the size source since,
-    /// or applied for the editor's own ask.
-    /// Kept rather than read back from the view, which the editor may size
-    /// otherwise (egui-baseview fits a size to the GPU's texture limit): a
-    /// mismatch read every frame would report, and run a pass, every frame.
-    size: (u32, u32),
-    /// Docked since the size source last asked, which asks the host for the
-    /// editor's size. A move out before it asked undoes it.
+    /// Docked since the last frame, which asks the host for the editor's
+    /// size. A move out before that frame undoes it.
     redocked: bool,
     /// A move asked for and not yet performed: out if true.
     wanted: Option<bool>,
@@ -106,10 +98,17 @@ fn as_object(window: &NSWindow) -> &AnyObject {
     window.as_ref()
 }
 
-/// The shell's limits, as the bounds of the player's resizing.
+/// The editor's limits, as the bounds of the player's resizing. Read back
+/// from the window rather than kept, and set only where they differ, since
+/// every frame asks.
 fn set_limits(window: &NSWindow, limits: Limits) {
-    window.setContentMinSize(ns_size(limits.min));
-    window.setContentMaxSize(ns_size(limits.max));
+    let (min, max) = (ns_size(limits.min), ns_size(limits.max));
+    if window.contentMinSize() != min {
+        window.setContentMinSize(min);
+    }
+    if window.contentMaxSize() != max {
+        window.setContentMaxSize(max);
+    }
 }
 
 /// Content at `size`, keeping the window's top-left corner, as a host's
@@ -318,12 +317,13 @@ unsafe fn retain_view(view: *mut c_void) -> Option<Retained<NSView>> {
 }
 
 impl OwnWindow {
-    /// An editor's own window, not yet open. `name` is its title, and the
+    /// `editor`'s own window, not yet open. `name` is its title, and the
     /// name AppKit remembers its frame under: a new name starts from where
     /// the host's window is.
-    pub fn new(name: &str) -> Arc<Self> {
+    pub(crate) fn new(name: &str, editor: Weak<EditorSize>) -> Arc<Self> {
         let local = Local {
             name: NSString::from_str(name),
+            editor,
             state: RefCell::default(),
         };
         Arc::new(Self(MainThreadBound::new(local, main_thread())))
@@ -341,22 +341,18 @@ impl OwnWindow {
     /// into its own window if it is to be `out`. Called once, outside any
     /// frame (see the crate documentation). `closed` tells the host the user
     /// closed the window, and returns whether it could; it may destroy the
-    /// editor during the call, and is let go at [`Self::close`]. With `out`,
-    /// `moving` is called inside this call, so it is not made under a lock
-    /// `moving` takes.
+    /// editor during the call, and is let go at [`Self::close`].
     ///
     /// # Safety
     ///
     /// `host` and `view` are each null or an `NSView` alive for the call: the
     /// host's view the editor opened in, and the editor's own, inside it.
-    pub unsafe fn open(
+    pub(crate) unsafe fn open(
         self: &Arc<Self>,
         host: *mut c_void,
         view: *mut c_void,
         out: bool,
-        limits: Limits,
         closed: Option<Box<dyn Fn() -> bool>>,
-        moving: Box<dyn Fn(Move)>,
     ) {
         // First, so a call off the main thread panics before it changes anything.
         let state = self.state();
@@ -383,8 +379,6 @@ impl OwnWindow {
             view: Some(view),
             agent: Some(agent),
             closed: closed.map(Rc::from),
-            moving: Some(Rc::from(moving)),
-            limits: Some(limits),
             ..State::default()
         };
         if out {
@@ -394,21 +388,21 @@ impl OwnWindow {
 
     /// Whether the editor can have a window of its own here: it opened in an
     /// AppKit view.
-    pub fn offered(&self) -> bool {
+    pub(crate) fn offered(&self) -> bool {
         self.state().borrow().agent.is_some()
     }
 
     /// Whether the view is in its own window: true from just before it moves
     /// in to just before it moves out, so a host `set_size` arriving while it
     /// is there, which sizes the host's now empty window, can be told apart.
-    pub fn is_out(&self) -> bool {
+    pub(crate) fn is_out(&self) -> bool {
         self.state().borrow().window.is_some()
     }
 
     /// Ask for the editor in its own window or in the host's, performed on
     /// the run loop's next turn if it is not there already: asked from a
     /// frame, which is no place to move it (see the crate documentation).
-    pub fn want(&self, out: bool) {
+    pub(crate) fn want(&self, out: bool) {
         let (agent, withdrawn) = {
             let mut state = self.state().borrow_mut();
             if state.window.is_some() == out {
@@ -436,61 +430,63 @@ impl OwnWindow {
         }
     }
 
-    /// The size source's question, asked before the host's, with the sizes
-    /// the shell allows now: what the view's size owes to where it is.
+    /// The own window's part of `editor`'s frame, at the top of it: while
+    /// the view is out, the host's window kept concealed, should the host
+    /// have put it back or shown it only after the editor opened; the
+    /// window's bounds following the editor's limits; and the window's size,
+    /// within them, taken as the editor's when the player has resized it.
+    /// Returns whether the view has docked since the last frame, which owes
+    /// the host the editor's size.
     ///
-    /// Also where the host's window is kept concealed while the editor is out
-    /// of it, should the host have put it back, or have shown it only after
-    /// the editor opened, and where the own window's limits follow the
-    /// shell's.
-    pub fn take_size(&self, limits: Limits) -> Option<OwnSize> {
-        let (window, host, changed) = {
+    /// A window whose content is the editor's size, or whose size within the
+    /// limits is, has nothing to give. So a window the limits moved past, left
+    /// as it was, keeps the editor's size until the player resizes it, as a
+    /// host's window does; and since the window's content is compared, not
+    /// the view's, which the editor may size otherwise (egui-baseview fits one
+    /// to the GPU's texture limit), no lasting difference is taken every
+    /// frame.
+    pub(crate) fn next_frame(&self, editor: &EditorSize) -> bool {
+        let (window, host) = {
             let mut state = self.state().borrow_mut();
-            let changed = state.limits.replace(limits) != Some(limits);
             let Some(window) = state.window.clone() else {
-                return std::mem::take(&mut state.redocked).then_some(OwnSize::Docked);
+                return std::mem::take(&mut state.redocked);
             };
-            (window, state.host.clone(), changed)
+            (window, state.host.clone())
         };
         if let Some(host_window) = host.and_then(|host| host.window()) {
             conceal(&host_window);
         }
-        if changed {
-            set_limits(&window, limits);
+        let limits = editor.limits();
+        set_limits(&window, limits);
+        if let Some(content) = window.contentView() {
+            let content = logical(content.frame().size);
+            let taken = limits.clamp(content);
+            let size = editor.size();
+            if content != size && taken != size {
+                editor.own_sized(taken);
+            }
         }
-        let size = logical(window.contentView()?.frame().size);
-        let mut state = self.state().borrow_mut();
-        (size != state.size).then(|| {
-            state.size = size;
-            OwnSize::Resized(size)
-        })
+        false
     }
 
-    /// A size the editor asked for itself (a pane folding sideways, a
-    /// restore), given to its own window instead of to the host, from the
-    /// window's top-left corner, within the limits as last given: AppKit
-    /// holds a frame set in code to none. Returns the content size applied,
-    /// which the editor takes, or `None` while the view is in the host's
-    /// window.
-    pub fn resize(&self, size: (u32, u32)) -> Option<(u32, u32)> {
-        let (window, limits) = {
-            let state = self.state().borrow();
-            (state.window.clone()?, state.limits)
-        };
-        let size = limits.map_or(size, |limits| limits.clamp(size));
-        let applied = set_content_size(&window, ns_size(size));
-        self.state().borrow_mut().size = applied;
-        Some(applied)
+    /// A size the editor asked for while the view is out (a pane folding
+    /// sideways, a restore), given to its own window instead of to the host,
+    /// from the window's top-left corner: AppKit holds a frame set in code to
+    /// no limits, and the frame holds the ask to them as it takes it. Returns
+    /// the content size applied, which the editor takes, or `None` while the
+    /// view is in the host's window.
+    pub(crate) fn resize(&self, size: (u32, u32)) -> Option<(u32, u32)> {
+        let window = self.state().borrow().window.clone()?;
+        Some(set_content_size(&window, ns_size(size)))
     }
 
     /// The editor closing, called before baseview closes the view, which
     /// takes it out of whichever window it is in: show the host's window
     /// again, should the host reuse it, close the editor's own, call off
     /// everything pending, and let go of everything. Repeated calls are
-    /// harmless, and dropping the last reference does the same. With the
-    /// view out, both call `moving` inside them, and `close` can itself run
-    /// inside `closed`, so neither is made under a lock `moving` takes.
-    pub fn close(&self) {
+    /// harmless, and dropping the last reference does the same. `close` can
+    /// itself run inside `closed`.
+    pub(crate) fn close(&self) {
         self.local().close();
     }
 
@@ -511,7 +507,7 @@ impl OwnWindow {
     }
 
     fn pop(&self) {
-        let (host, view, agent, closable, limits, moving) = {
+        let (host, view, agent, closable) = {
             let state = self.state().borrow();
             let (None, Some(host), Some(view), Some(agent)) =
                 (&state.window, &state.host, &state.view, &state.agent)
@@ -523,9 +519,12 @@ impl OwnWindow {
                 view.clone(),
                 agent.clone(),
                 state.closed.is_some(),
-                state.limits,
-                state.moving.clone(),
             )
+        };
+        // The limits as they are now, which may have changed since the last
+        // frame: none runs while the editor cannot be seen.
+        let Some(limits) = self.local().editor.upgrade().map(|editor| editor.limits()) else {
+            return;
         };
 
         let content = view.frame().size;
@@ -585,34 +584,25 @@ impl OwnWindow {
         // the naming, which restores the remembered frame again (measured)
         // and would undo a size set before it. Nothing keeps the larger
         // window on screen beyond what AppKit does as it orders it in.
-        let wanted = match limits {
-            Some(limits) => {
-                set_limits(&own, limits);
-                limits.clamp(logical(content))
-            }
-            None => logical(content),
-        };
-        let size = set_content_size(&own, ns_size(wanted));
+        set_limits(&own, limits);
+        let size = set_content_size(&own, ns_size(limits.clamp(logical(content))));
 
         let Some(own_content) = own.contentView() else {
             return;
         };
-        // The shell first, with no borrow held: from here the editor's size
-        // is this window's, which a save must find at once rather than at the
-        // next frame, since none runs while the editor cannot be seen.
-        if let Some(moving) = moving {
-            moving(Move::Out(size));
+        // From here the editor's size is this window's, which a save must
+        // find at once rather than at the next frame, since none runs while
+        // the editor cannot be seen; the next frame lays the view out at it.
+        if let Some(editor) = self.local().editor.upgrade() {
+            editor.own_sized(size);
         }
         // Out from here, before the view moves: attaching it can draw a frame
         // on the spot, whose size source must find it out, and a host
-        // `set_size` arriving from now on is not the editor's. The view's
-        // size is what the editor has; one the limits changed is reported at
-        // the next frame. A dock no frame has seen yet is undone, and owes the
-        // host nothing.
+        // `set_size` arriving from now on is not the editor's. A dock no
+        // frame has seen yet is undone, and owes the host nothing.
         {
             let mut state = self.state().borrow_mut();
             state.window = Some(own.clone());
-            state.size = logical(view.frame().size);
             state.redocked = false;
         }
         // The move. Made without a state borrow, as every native call here
@@ -627,10 +617,10 @@ impl OwnWindow {
     }
 
     /// Back into the host's window, shown again, and the editor's own closed.
-    /// The view keeps its size; the size source asks the host for the same
-    /// ([`OwnSize::Docked`]).
+    /// The view keeps its size; the next frame asks the host for the same
+    /// ([`Self::next_frame`]).
     fn dock(&self) {
-        let (window, host, view, moving) = {
+        let (window, host, view) = {
             let mut state = self.state().borrow_mut();
             let Some(window) = state.window.take() else {
                 return;
@@ -639,16 +629,8 @@ impl OwnWindow {
             // frame's size source must already find it docked.
             state.redocked = true;
             state.settling = None;
-            (
-                window,
-                state.host.clone(),
-                state.view.clone(),
-                state.moving.clone(),
-            )
+            (window, state.host.clone(), state.view.clone())
         };
-        if let Some(moving) = moving {
-            moving(Move::Back);
-        }
         // SAFETY: clearing the delegate this window was given.
         let () = unsafe { msg_send![&*window, setDelegate: None::<&AnyObject>] };
         if let (Some(host), Some(view)) = (host, view) {
@@ -789,9 +771,6 @@ impl Local {
         // Out of the borrow before native calls, which may reenter a size
         // source or frame. Those find the empty state.
         let state = std::mem::take(&mut *self.state.borrow_mut());
-        if let (Some(_), Some(moving)) = (&state.window, &state.moving) {
-            moving(Move::Back);
-        }
         if let Some(agent) = &state.agent {
             // Every deferred move, close and look: none is owed to an editor
             // that has closed.
@@ -936,7 +915,7 @@ impl Agent {
 
 /// `call` on the agent's window, if it is still there, under a catch. The
 /// agent's calls come from the run loop, outside any frame or call of the
-/// plug-in's, and reach the plug-in's `closed` and `moving`: a panic
+/// plug-in's, and reach the plug-in's `closed`: a panic
 /// unwinding into AppKit from them would take the host process down, where
 /// caught it costs the one act, the window left as the panic left it. The
 /// process's panic hook has logged it. Unlatched, unlike a frame's catch,

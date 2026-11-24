@@ -29,9 +29,9 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::{Limits, Move, OwnSize, OwnWindow};
+use crate::{Limits, OwnWindow};
 
 /// The largest side the size word holds, in logical pixels.
 const MAX_SIDE: u32 = 32767;
@@ -304,25 +304,26 @@ impl EditorSize {
         self.native.restore(self.limits().clamp(size));
     }
 
-    /// The host sized the editor's window: refused outside the limits, and
-    /// otherwise taken, unless the own window owns the size: the view is in
-    /// it, which leaves the host's empty, or the editor is not attached and
-    /// `opens_out`, asked only then, says it will open there. Then the editor
-    /// keeps its size, the one its project saved (Yan decided,
-    /// egui-plugin-window#12), and the call succeeds, as the host's window
-    /// may be sized as the host likes.
+    /// The host sized the editor's window. While the own window owns the
+    /// size, the view being in it, which leaves the host's empty, or the
+    /// editor not attached and `opens_out`, asked only then, saying it will
+    /// open there, the editor keeps its size, the one its project saved (Yan
+    /// decided, egui-plugin-window#12), and the call succeeds whatever the
+    /// size, as the host's window may be sized as the host likes. Otherwise
+    /// the size is refused outside the limits, and taken within them.
     pub fn host_set_size(&self, size: (u32, u32), opens_out: impl FnOnce() -> bool) -> bool {
-        if self.limits().clamp(size) != size {
-            return false;
-        }
         let owns = if self.is_open() {
             self.is_out()
         } else {
             cfg!(target_os = "macos") && opens_out()
         };
-        if !owns {
-            self.native.accept(size);
+        if owns {
+            return true;
         }
+        if self.limits().clamp(size) != size {
+            return false;
+        }
+        self.native.accept(size);
         true
     }
 
@@ -352,24 +353,23 @@ impl EditorSize {
         if !self.is_open() {
             return;
         }
-        let own = OwnWindow::new(&self.name);
+        let own = OwnWindow::new(&self.name, Arc::downgrade(self));
         // In the slot before the move out, which can draw a frame on the
         // spot whose size source asks it. One already there, from a shell
         // that attached twice, goes once the lock is let go.
         let previous = self.slot().replace(own.clone());
         drop(previous);
-        let editor: Weak<Self> = Arc::downgrade(self);
-        // From a move out the editor's size is the own window's, which a
-        // save must find at once rather than at the next frame, since none
-        // runs while the editor cannot be seen. Atomics only, as `moving`
-        // runs inside the moves.
-        let moving = Box::new(move |moved| {
-            if let (Move::Out(size), Some(editor)) = (moved, editor.upgrade()) {
-                editor.native.accept(size);
-            }
-        });
         // SAFETY: the caller's.
-        unsafe { own.open(host, view, out, self.limits(), closed, moving) };
+        unsafe { own.open(host, view, out, closed) };
+    }
+
+    /// The own window's size, taken as the editor's: at a move out, which a
+    /// save must find at once rather than at the next frame, since none runs
+    /// while the editor cannot be seen; at a frame after the player resized
+    /// it; and as applied for a size the editor asked for. Atomics only, as
+    /// it runs inside the moves, which run inside this editor's own calls.
+    pub(crate) fn own_sized(&self, size: (u32, u32)) {
+        self.native.accept(size);
     }
 
     /// The frame's size, from the size source of the open editor `opened`:
@@ -377,39 +377,35 @@ impl EditorSize {
     /// window grants in the host's place while the view is in it and
     /// `request_resize` asks the host for otherwise, and then any size the
     /// host set. `None` when the size is the one the frame last had.
+    ///
+    /// `request_resize` is given the size the host is asked for, which
+    /// [`Self::reported_size`] also gives during the call: a proposal, or,
+    /// at the first frame after a dock, the editor's size, which the host's
+    /// window, left at whatever size it last had, is asked to take.
     pub fn next_frame(
         &self,
         opened: Opened,
-        request_resize: impl Fn() -> bool,
+        request_resize: impl Fn((u32, u32)) -> bool,
     ) -> Option<(u32, u32)> {
         if !self.native.current(opened.0) {
             return None;
         }
         let own = self.own_window();
-        if let Some(own) = &own {
-            let limits = self.limits();
-            match own.take_size(limits) {
-                Some(OwnSize::Resized(size)) => self.native.accept(limits.clamp(size)),
-                // The host's window kept whatever size it last had;
-                // `reported_size` gives the editor's, which it is asked for.
-                Some(OwnSize::Docked) => {
-                    request_resize();
-                }
-                None => {}
-            }
+        if own.as_ref().is_some_and(|own| own.next_frame(self)) {
+            request_resize(self.size());
         }
         self.native.next_frame(opened.0, self.limits(), |size| {
             match own.as_ref().and_then(|own| own.resize(size)) {
                 // Taken as a host's `set_size` during the request is: the
                 // size the window applied, which the proposal then does not
-                // overwrite. As it is: the window has recorded that size,
-                // and another here would lay the view out at one size in a
-                // window of another.
+                // overwrite. As it is: the window has that size, and another
+                // here would lay the view out at one size in a window of
+                // another.
                 Some(applied) => {
-                    self.native.accept(applied);
+                    self.own_sized(applied);
                     true
                 }
-                None => request_resize(),
+                None => request_resize(size),
             }
         })
     }
@@ -614,14 +610,15 @@ mod tests {
     fn a_queued_request_is_held_to_limits_raised_since() {
         let editor = EditorSize::new("test", INITIAL, LIMITS);
         let opened = editor.open();
-        editor.next_frame(opened, || panic!());
+        editor.next_frame(opened, |_| panic!());
         editor.request_size((700, 400));
         editor.set_limits(Limits {
             min: (800, 450),
             max: (4096, 4096),
         });
         assert_eq!(
-            editor.next_frame(opened, || {
+            editor.next_frame(opened, |asked| {
+                assert_eq!(asked, (800, 450));
                 assert_eq!(editor.reported_size(), (800, 450));
                 true
             }),
@@ -662,11 +659,12 @@ mod tests {
         assert_eq!(editor.size(), (801, 503));
         assert_eq!(editor.reported_size(), (801, 503));
         let opened = editor.open();
-        assert_eq!(editor.next_frame(opened, || panic!()), Some((801, 503)));
+        assert_eq!(editor.next_frame(opened, |_| panic!()), Some((801, 503)));
         editor.request_size((1500, 900));
         assert_eq!(editor.size(), (801, 503));
         assert_eq!(
-            editor.next_frame(opened, || {
+            editor.next_frame(opened, |asked| {
+                assert_eq!(asked, (1500, 900));
                 assert_eq!(editor.reported_size(), (1500, 900));
                 assert_eq!(editor.size(), (801, 503));
                 true
@@ -689,7 +687,7 @@ mod tests {
             },
         );
         let opened = editor.open();
-        editor.next_frame(opened, || panic!());
+        editor.next_frame(opened, |_| panic!());
         editor.set_limits(Limits {
             min: (1280, 720),
             max: (4096, 4096),
@@ -697,7 +695,7 @@ mod tests {
         assert_eq!(editor.size(), (1400, 800));
         assert!(!editor.host_set_size((900, 500), || false));
         editor.request_size((900, 500));
-        assert_eq!(editor.next_frame(opened, || true), Some((1280, 720)));
+        assert_eq!(editor.next_frame(opened, |_| true), Some((1280, 720)));
     }
 
     #[test]
@@ -710,7 +708,7 @@ mod tests {
         assert_eq!(editor.size(), (800, 500));
         let opened = editor.open();
         assert_eq!(
-            editor.next_frame(opened, || panic!("a closed request needs no host request")),
+            editor.next_frame(opened, |_| panic!("a closed request needs no host request")),
             Some((800, 500))
         );
     }
@@ -742,7 +740,21 @@ mod tests {
         assert!(editor.host_set_size((900, 600), || panic!("asked while open")));
         assert_eq!(editor.size(), (900, 600));
         assert!(!editor.offered());
-        assert_eq!(editor.next_frame(earlier, || panic!()), None);
-        assert_eq!(editor.next_frame(opened, || panic!()), Some((900, 600)));
+        assert_eq!(editor.next_frame(earlier, |_| panic!()), None);
+        assert_eq!(editor.next_frame(opened, |_| panic!()), Some((900, 600)));
+    }
+
+    /// Ownership is decided before the limits: while the own window owns
+    /// the size, a host size outside the limits succeeds and changes
+    /// nothing, as one within them does.
+    #[test]
+    fn an_owned_size_takes_any_host_size() {
+        let editor = EditorSize::new("test", INITIAL, LIMITS);
+        let owned = cfg!(target_os = "macos");
+        assert_eq!(editor.host_set_size((1, 1), || true), owned);
+        assert_eq!(editor.host_set_size((9000, 9000), || true), owned);
+        assert_eq!(editor.size(), INITIAL);
+        assert!(!editor.host_set_size((1, 1), || false));
+        assert_eq!(editor.size(), INITIAL);
     }
 }
