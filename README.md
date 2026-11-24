@@ -18,9 +18,9 @@ platform but macOS opens a window, and no host but Bitwig is tested.
 - `plugin-own-window/`: the editor's own window. It moves the editor's view
   out of the host's window into one of its own, so the editor stays on
   screen while another app is in front, and back, and keeps the editor's
-  size (`EditorSize`): what the host is told, what the project saves, and
-  when the own window has the say. It depends on AppKit alone, through the
-  objc2 crates, not on the other two.
+  size: what the host is told, what the project saves, and when the own
+  window has the say. A shell sees it through `EditorSize` alone. It
+  depends on AppKit alone, through the objc2 crates, not on the other two.
 
 The first two began as crates.io releases (`baseview` 0.1.4, `egui-baseview` 0.3.0,
 MIT OR Apache-2.0, licenses in each directory) and are no longer reconciled

@@ -23,7 +23,7 @@ mod macos {
         NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSUserDefaults};
-    use plugin_own_window::{Limits, OwnWindow};
+    use plugin_own_window::{EditorSize, Limits};
     use raw_window_handle::{AppKitWindowHandle, HasRawWindowHandle, RawWindowHandle};
 
     define_class!(
@@ -177,25 +177,21 @@ mod macos {
                 unreachable!()
             };
             let view = unsafe { Retained::retain(raw.ns_view.cast::<NSView>()).unwrap() };
-            let own = OwnWindow::new(&name());
-            // SAFETY: both views are alive.
-            unsafe {
-                own.open(
-                    host_ptr,
-                    raw.ns_view,
-                    false,
-                    Limits {
-                        min: (50, 50),
-                        max: (1000, 1000),
-                    },
-                    None,
-                    Box::new(|_| {}),
-                )
-            };
+            let editor = EditorSize::new(
+                &name(),
+                (100, 100),
+                Limits {
+                    min: (50, 50),
+                    max: (1000, 1000),
+                },
+            );
+            editor.open();
+            // SAFETY: both views are alive, the one inside the other.
+            unsafe { editor.attach(host_ptr, raw.ns_view, false, None) };
             for (mode, out) in [("own window", true), ("redocked", false)] {
-                own.want(out);
-                turn_until(|| own.is_out() == out);
-                assert_eq!(own.is_out(), out, "{mode}");
+                editor.want(out);
+                turn_until(|| editor.is_out() == out);
+                assert_eq!(editor.is_out(), out, "{mode}");
                 for captured in [false, true] {
                     capture.store(captured, Ordering::Relaxed);
                     let before = host.ivars().get();
@@ -208,7 +204,7 @@ mod macos {
                     assert_eq!(host.ivars().get(), expected, "{mode}, captured={captured}");
                 }
             }
-            own.close();
+            editor.close();
             handle.close();
             host_window.close();
             println!("host keys through the own window: own window and redocked passed");

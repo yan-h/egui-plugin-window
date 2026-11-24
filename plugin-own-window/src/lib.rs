@@ -22,9 +22,9 @@
 //! key sends baseview a focus event on the spot, and baseview's handler is
 //! borrowed for the whole frame, so a move from a frame panics across AppKit
 //! and takes the host process down. The one at open is made from
-//! [`OwnWindow::open`], which the plug-in calls outside any frame; one the
+//! [`EditorSize::attach`], which the plug-in calls outside any frame; one the
 //! player asks for from a frame is performed on the run loop's next turn
-//! ([`OwnWindow::want`]).
+//! ([`EditorSize::want`]).
 //!
 //! What the host's window did for the editor, this one does in its place. It
 //! floats above the host's windows while the host is in front, as Bitwig's
@@ -60,22 +60,21 @@
 //! most one move is queued at a time, so no window opens again between a
 //! click and its telling.
 //!
-//! The view's size is the plug-in's size source's to set, as for a host
-//! resize: the size source asks [`OwnWindow::take_size`] first, at the top of
-//! the frame it will be laid out in, and hands a size the editor asks for to
-//! [`OwnWindow::resize`] before the host. Each move is told to the shell as
-//! it happens ([`Move`]), before the view moves. Every call here is on the main
+//! [`EditorSize`] is the whole of it a shell sees: the editor's size, its
+//! negotiation with the host, and the own window, which it makes at attach
+//! and lets go at close. A shell supplies the window's name, the limits, the
+//! saved choice of window, the close callback and the host's
+//! `request_resize`. While the view is out, the window's size is the
+//! editor's: a move out sets it at once, the player's resize at the next
+//! frame ([`EditorSize::next_frame`], at the top of the frame it will be laid
+//! out in), and a size the editor asks for is given to the window rather
+//! than to the host. Every call that reaches the window is on the main
 //! thread, where egui-baseview runs its size source and its frames and where
 //! a CLAP host creates and destroys the editor; one from any other thread
 //! panics.
 //!
-//! Off macOS nothing moves: [`OwnWindow::offered`] is false and every other
-//! call does nothing.
-//!
-//! [`EditorSize`] runs that sequence for a shell: the editor's size, its
-//! negotiation with the host, and the own window, so a shell supplies the
-//! window's name, the limits, the saved choice of window, the close callback
-//! and the host's `request_resize`, and calls [`OwnWindow`] through it.
+//! Off macOS nothing moves: [`EditorSize::offered`] is false, and every size
+//! is the host's to negotiate.
 //!
 //! Where it came from, and what it took from each plug-in's copy, is in
 //! `PATCHES.md` at the repository's root.
@@ -83,12 +82,12 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::OwnWindow;
+use macos::OwnWindow;
 
 #[cfg(not(target_os = "macos"))]
 mod elsewhere;
 #[cfg(not(target_os = "macos"))]
-pub use elsewhere::OwnWindow;
+use elsewhere::OwnWindow;
 
 mod size;
 pub use size::{EditorSize, Opened};
@@ -111,37 +110,4 @@ impl Limits {
             height.clamp(self.min.1, self.max.1.max(self.min.1)),
         )
     }
-}
-
-/// What the size source owes the view this frame, from
-/// [`OwnWindow::take_size`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OwnSize {
-    /// The view is in its own window, which is this size: the editor takes
-    /// it. Reported when the window's size differs from the one the editor
-    /// last had from it: after the player resizes it, or after a move out
-    /// whose limits the editor's size was outside. A size the editor asked for
-    /// through [`OwnWindow::resize`] is returned there, not reported again.
-    Resized((u32, u32)),
-    /// The view is back in the host's window, which the plug-in asks for the
-    /// editor's size, as for a resize the editor asks for itself.
-    Docked,
-}
-
-/// A move of the editor's view, told to the shell as it happens
-/// ([`OwnWindow::open`]'s `moving`), before the view moves, so that what
-/// the shell keeps of the editor's size, a save's among it, is right at once
-/// rather than at the next frame, which does not come while the editor
-/// cannot be seen. It is called on the main thread inside the call that
-/// moves the view: `open` with `out`, the run loop's deferred move,
-/// `close`, and the last drop. A lock it takes must not be held across any
-/// of those, or the main thread deadlocks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Move {
-    /// Into its own window, whose content is this size, in logical points:
-    /// from now on the editor's size is the window's, and a host `set_size`
-    /// sizes the host's empty window.
-    Out((u32, u32)),
-    /// Out of its own window: docked in the host's, or the editor closing.
-    Back,
 }

@@ -523,7 +523,7 @@ otonal's was ported from harmonigraph's at harmonigraph `b154fe82`; which side e
 the main-thread rule held by `dispatch2::MainThreadBound` rather than a `Mutex` and `unsafe impl Send`;
 the latch that tells the host of a close click once;
 no close button where there is no host to tell.
-- **From otonal's**: the minimum and maximum size given by the shell (at `open`, then at every frame through `take_size`'s `Limits`), where harmonigraph's had a fixed minimum;
+- **From otonal's**: the minimum and maximum size given by the shell (now the editor's limits, read as a move out opens the window and at every frame), where harmonigraph's had a fixed minimum;
 `is_out`, for a host `set_size` arriving while the view is out;
 a move out before a pending dock was seen owes the host no resize;
 a pending look for an app's windows called off at a dock;
@@ -539,17 +539,17 @@ so for harmonigraph, whose copy left it to AppKit, this is very likely no visibl
   objc2 0.6.4's `define_class!` names a class `module_path!()::Name` plus the crate version, and when a class of that auto-generated name already exists it does not panic:
   `define_class` in `src/__macro_helpers/define_class.rs` takes the `else` branch of `ClassBuilder::new` and returns `AnyClass::get(c_name)` ("we assume that the existing class is the one that we want", lines 248-297; it panics only for a name given with `#[name = ...]`).
   The second plug-in would then use the first one's class, with the first build's methods and instance layout.
-  - The shell is told of each move synchronously, before the view moves (`Move::Out` with the window's content size, and `Move::Back` at a dock or a close while out), so what it keeps of the editor's size, a save's among it, is right without waiting for a frame, which does not run while the editor cannot be seen.
+  - A move out sets the editor's size to the window's content size synchronously, before the view moves, so the editor's size, a save's among it, is right without waiting for a frame, which does not run while the editor cannot be seen.
   harmonigraph's copy wrote its saved state from inside `pop` and `dock`; otonal's told its shell nothing until the next frame.
   - A deferred close carries the window clicked and is told only while that window is still the editor's; and a move withdrawn by `want` has its queued `apply:` cancelled, so at most one is queued.
   Harmonigraph's copy cancelled a pending close at a dock; otonal's did neither, and left a withdrawn `apply:` queued in both.
   A click queued before a dock is honoured; one queued behind a pending dock is dropped.
-  - `resize` returns the content size AppKit applied, for the editor to take, rather than a success flag.
+  - A size the editor asks for while out is taken as the content size AppKit applied, rather than as asked.
   - The window reopens where it was, at the editor's size within the limits, keeping the remembered top-left corner (decided by Yan, tracked in yan-h/egui-plugin-window#12).
   Both copies meant to, but set the size between `setFrameUsingName:` and `setFrameAutosaveName:`, and naming the frame restores the remembered one again (measured),
   so their window reopened as large as the last own window was, and the editor took that size. The size is now set after the naming.
   - It takes the two views as raw `NSView` pointers rather than either shell's window-handle types, so it depends on neither shell nor on `raw-window-handle`.
-  - The agent's run-loop calls (`activated:`, `apply:`, `hostClose:`, `settle:`) run under a catch (`answer`), since they reach the shell's `moving` and `closed` outside any frame or plug-in call, and a panic unwinding into AppKit would take the host down (otonal#1827). Unlatched: each answers one act of the player's, not every frame. The process's panic hook logs it; this crate has no logger.
+  - The agent's run-loop calls (`activated:`, `apply:`, `hostClose:`, `settle:`) run under a catch (`answer`), since they reach the shell's `closed` outside any frame or plug-in call, and a panic unwinding into AppKit would take the host down (otonal#1827). Unlatched: each answers one act of the player's, not every frame. The process's panic hook logs it; this crate has no logger.
 A panic in the `closed` callback clears the close latch while the window is still the editor's, so the button works again.
 - **The editor's size** (`src/size.rs`, `EditorSize`; issue #13): otonal's size negotiation (`crates/otonal-clap/src/editor/resize.rs` and its `next_size`), moved here whole, with the own window folded in, so a shell runs one sequence rather than each writing it.
   The sequence and its lock-free word are otonal's, with its negotiation tests; its test of the sequence against a fake own window became a native one against a real window (`editor_size`), which cannot make AppKit apply another size than asked, so that case is untested.
@@ -557,6 +557,10 @@ A panic in the `closed` callback clears the close latch while the window is stil
   limits outside what the word holds (a side of 0 or above 32767, a maximum below its minimum) are held to it rather than panicking, since a panic here takes the host down;
   a queued request is held to the limits once, as the frame takes it, so the host is told the size the own window would be given, where otonal clamped only the own window's;
   the saved choice of window is asked for by `host_set_size` only while the editor is not attached, rather than read by an own-window trait;
-  and a move out accepts the own window's size at once, as harmonigraph's `moving` did, rather than at the next frame.
-  `OwnWindow` stays public beside it until harmonigraph's shell moves onto `EditorSize` (harmonigraph#1814, its GUI step); then `OwnWindow`'s sizing calls, `Move` and `OwnSize` can leave the public surface.
-- **Tests**: `tests/own_window.rs` (the moves and their notices, the window held in one Space, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, a reopen over a remembered frame, the shared size sequence on a real window), `src/size.rs`'s unit tests (otonal's, and the limits and the saved choice) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).
+  and a move out accepts the own window's size at once, as harmonigraph's `moving` callback did, rather than at the next frame.
+  Once harmonigraph's shell moved onto `EditorSize` (harmonigraph#1875), the own window left the public surface (#23): `OwnWindow`, its `take_size`, `resize` and `moving`, `Move` and `OwnSize` went,
+  and the own window holds its editor weakly, reading its limits when it needs them and taking its size into the editor's size word directly, so the window keeps no copy of either.
+  A move out now opens the window within the limits as they are then, where it took them as the last frame gave them.
+  A window whose content size differs from the editor's is taken once: a window the limits moved past keeps the editor's size until the player resizes it, as before.
+  `next_frame`'s `request_resize` is given the size the host is asked for (approved by Yan, 2026-11-24, with this change), and `host_set_size` decides ownership before the limits, so while the own window owns the size any host size succeeds and changes nothing, as its documentation said (#27's notes, on #23).
+- **Tests**: `tests/own_window.rs`, through `EditorSize` alone (the moves and the sizes they set, the window held in one Space, the host's window kept concealed, the host asked once after a dock and not after an undone one, the close latch and the order of a click and a dock, a click from a replaced window, a drop with calls pending, the resize's corner, the limits, no size every frame from a lasting difference, a reopen over a remembered frame, the shared size sequence on a real window), `src/size.rs`'s unit tests (otonal's, and the limits, the saved choice and ownership before the limits) and `tests/host_keys.rs` (otonal's `host_keys` case for a view in its own window and docked again, with the moves made here).
