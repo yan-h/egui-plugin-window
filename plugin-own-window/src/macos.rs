@@ -65,7 +65,8 @@ struct State {
     /// just before it moves out.
     window: Option<Retained<NSWindow>>,
     /// Docked since the last frame, which asks the host for the editor's
-    /// size. A move out before that frame undoes it.
+    /// size. Read only while docked, so a move out before that frame undoes
+    /// it, and owes the host nothing.
     redocked: bool,
     /// A move asked for and not yet performed: out if true.
     wanted: Option<bool>,
@@ -438,13 +439,13 @@ impl OwnWindow {
     /// Returns whether the view has docked since the last frame, which owes
     /// the host the editor's size.
     ///
-    /// A window whose content is the editor's size, or whose size within the
-    /// limits is, has nothing to give. So a window the limits moved past, left
-    /// as it was, keeps the editor's size until the player resizes it, as a
-    /// host's window does; and since the window's content is compared, not
-    /// the view's, which the editor may size otherwise (egui-baseview fits one
-    /// to the GPU's texture limit), no lasting difference is taken every
-    /// frame.
+    /// Nothing is taken while the window's content is the editor's size, or
+    /// would be within the limits. So a window the limits moved past, left as
+    /// it was, keeps the editor's size until the player resizes it, as a
+    /// host's window does, and a window sized past its limits is taken once,
+    /// within them. The window's content is compared, not the view's, which
+    /// the editor may size otherwise (egui-baseview fits one to the GPU's
+    /// texture limit): no lasting difference is taken more than once.
     pub(crate) fn next_frame(&self, editor: &EditorSize) -> bool {
         let (window, host) = {
             let mut state = self.state().borrow_mut();
@@ -598,13 +599,8 @@ impl OwnWindow {
         }
         // Out from here, before the view moves: attaching it can draw a frame
         // on the spot, whose size source must find it out, and a host
-        // `set_size` arriving from now on is not the editor's. A dock no
-        // frame has seen yet is undone, and owes the host nothing.
-        {
-            let mut state = self.state().borrow_mut();
-            state.window = Some(own.clone());
-            state.redocked = false;
-        }
+        // `set_size` arriving from now on is not the editor's.
+        self.state().borrow_mut().window = Some(own.clone());
         // The move. Made without a state borrow, as every native call here
         // is: the frame drawn on the spot borrows the state.
         view.removeFromSuperview();

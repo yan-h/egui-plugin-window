@@ -9,6 +9,13 @@
 //! host otherwise), then the host's own `set_size`, which is ignored while
 //! the own window owns the size ([`EditorSize::host_set_size`]).
 //!
+//! The own window is this type's, from attach to close, and no shell sees
+//! it. It holds the editor weakly and reaches only its atomics: it reads the
+//! limits as it opens and at each frame, and sets the accepted size as the
+//! view moves out, at a frame after the player resized it, and as applied
+//! for a size the editor asked for. A move runs inside the editor's own
+//! calls, so nothing here holds a lock across one.
+//!
 //! One lock-free word publishes accepted size, pending proposal and whether
 //! the editor is open together, so a restore may reach it from any thread,
 //! with no lock, allocation or host call. The word holds 15 bits per
